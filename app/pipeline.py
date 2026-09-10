@@ -44,7 +44,7 @@ class PatientPipeline:
         archive_root = None
         warnings: list[str] = []
         try:
-            if self._use_patient_level_review() and hasattr(self.provider, "test_text_connection") and not self.diagnostics.is_ready(provider=getattr(self.provider, "name", "openai"), model=self.configuration.openai_medical_model):
+            if self._use_patient_level_review() and hasattr(self.provider, "test_text_connection") and not self.diagnostics.is_ready(provider=getattr(self.provider, "name", "openai"), model=getattr(self.provider, "configured_model", self.configuration.openai_medical_model)):
                 raise PatientLevelAIError("AI diagnostics are not ready: run Test AI Connection and Test Vision Extraction before processing patient records")
             if source.is_file():
                 archive_kind = detect_archive_type(source, source_mime_type)

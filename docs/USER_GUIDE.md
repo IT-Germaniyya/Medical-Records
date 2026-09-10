@@ -22,7 +22,7 @@ To add documents to an existing patient, open that patient and select **Add docu
 
 ## Patient-level AI review
 
-The default `AI_EXTRACTION_MODE=patient_level` sends the complete patient bundle to the configured multimodal model as one clinical case when `AI_EXTRACTION_PROVIDER=openai`. The model reads all pages/images together, preserves source references, reconstructs the longitudinal history, and produces the canonical review used by both reports. Configure `OPENAI_API_KEY`, `OPENAI_MEDICAL_MODEL`, `OPENAI_SUMMARY_MODEL`, and `OPENAI_IMAGE_DETAIL=high` through an untracked `.env` or a deployment secret manager. The key is never exposed to frontend JavaScript. Large records use a hierarchical multimodal fallback; if AI review cannot be completed, the patient is marked failed and the original files remain preserved.
+The default `AI_EXTRACTION_MODE=patient_level` sends the complete patient bundle to the configured multimodal model as one clinical case. Set `AI_PROVIDER=openai` to use OpenAI, or `AI_PROVIDER=openrouter` to use OpenRouter without changing the workflow. OpenAI uses `OPENAI_API_KEY` and `OPENAI_MEDICAL_MODEL`; OpenRouter uses `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, and `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`. A fixed OpenRouter model slug can be configured instead of `openrouter/free`; free routing may use different models between requests and extraction quality can vary. The model reads all pages/images together, preserves source references, reconstructs the longitudinal history, and produces the canonical review used by both reports. Configuration is passed to both API and worker containers, and keys are never exposed to frontend JavaScript. Large records use a hierarchical multimodal fallback; if AI review cannot be completed, the patient is marked failed and the original files remain preserved.
 
 ## Search for a patient
 
@@ -35,7 +35,7 @@ The workspace tabs are:
 - **Timeline**, **Problems**, **Labs**, **Medications**, and **Growth / Vitals**: structured clinical views.
 - **Review Items**: only uncertain or high-risk fields requiring a human decision.
 - **AI Clinical Review**: the holistic clinical summary, documented diagnoses, active problems, key investigations, medication history, pediatric/growth assessment, and uncertain/illegible items before report generation.
-- **AI diagnostics** (`/admin/ai`): administrators can run text and synthetic-vision connection tests. The page exposes only redacted error metadata (provider, model, HTTP status, request stage, retry count, and timestamp) in development/admin mode; secrets and patient payloads are never shown. Patient-level processing remains blocked until both checks pass.
+- **AI diagnostics** (`/admin/ai`): administrators can select the configured provider, run text and synthetic-vision connection tests, and compare OpenAI/OpenRouter on a de-identified patient. The page exposes only redacted error metadata (provider, model, HTTP status, request stage, retry count, and timestamp) in development/admin mode; secrets and patient payloads are never shown. Patient-level processing remains blocked until both checks pass.
 - **Reports**: generate and retrieve both report types.
 
 Use **Reprocess with AI** to invalidate the current reconstruction and create a new review version without deleting earlier report versions.

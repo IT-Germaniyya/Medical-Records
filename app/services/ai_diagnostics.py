@@ -1,4 +1,4 @@
-"""Safe, shared diagnostics for OpenAI requests.
+"""Safe, shared diagnostics for configured multimodal AI requests.
 
 Only redacted metadata is persisted here.  Request bodies, source filenames,
 authorization headers, and model output are deliberately never stored.
@@ -54,32 +54,33 @@ def http_status(exc: BaseException) -> int | None:
         return None
 
 
-def classify_error(exc: BaseException, *, stage: str) -> tuple[str, str]:
+def classify_error(exc: BaseException, *, stage: str, provider: str = "openai") -> tuple[str, str]:
     """Map SDK/network/schema failures to safe, actionable product language."""
 
+    label = "OpenRouter" if provider.casefold().startswith("openrouter") else "OpenAI"
     name = type(exc).__name__.casefold()
     message = safe_error_message(exc).casefold()
     status = http_status(exc)
     combined = f"{name} {message}"
     if status == 401 or "authentication" in combined or "invalid_api_key" in combined or "api key" in combined:
-        return "authentication_failed", "OpenAI authentication failed"
+        return "authentication_failed", f"{label} authentication failed"
     if "insufficient_quota" in combined or "credit_balance_exhausted" in combined or "no credits remaining" in combined:
-        return "quota_exhausted", "OpenAI quota or credits are exhausted"
+        return "quota_exhausted", f"{label} quota or credits are exhausted"
     if status == 404 or "model" in combined and any(token in combined for token in ("not found", "does not exist", "unavailable")):
-        return "model_unavailable", "Configured model is unavailable"
+        return "model_unavailable", f"Configured {label} model is unavailable"
     if status == 413 or any(token in combined for token in ("too large", "context length", "payload", "maximum context", "input too long")):
-        return "request_too_large", "AI request exceeded size limits"
+        return "request_too_large", f"{label} request exceeded size limits"
     if any(token in combined for token in ("schema", "structured output", "json_schema", "response_format")) or (stage in {"patient_review", "patient_synthesis"} and "validation" in combined):
-        return "structured_output_schema_rejected", "Structured output schema was rejected"
+        return "structured_output_schema_rejected", f"{label} structured output schema was rejected"
     if stage in {"vision_connection_test", "patient_review", "patient_synthesis", "page_extraction"} and any(token in combined for token in ("image", "file", "mime", "media", "input")):
-        return "input_preparation_failed", "Image/file input could not be prepared"
+        return "input_preparation_failed", f"{label} image/file input could not be prepared"
     if "timeout" in combined or "timed out" in combined:
-        return "request_timeout", "OpenAI request timed out"
+        return "request_timeout", f"{label} request timed out"
     if "rate" in combined and "limit" in combined:
-        return "rate_limit", "OpenAI rate limit reached"
+        return "rate_limit", f"{label} rate limit reached"
     if "connection" in combined or "dns" in combined or "network" in combined:
-        return "connection_failed", "Could not connect to OpenAI"
-    return "openai_request_failed", "OpenAI request failed"
+        return "connection_failed", f"Could not connect to {label}"
+    return "ai_request_failed", f"{label} request failed"
 
 
 class AIDiagnosticsStore:
@@ -135,9 +136,9 @@ class AIDiagnosticsStore:
                 row.success_count = int(row.success_count or 0) + 1
                 row.last_successful_request = now
             elif exc is not None:
-                code, _ = classify_error(exc, stage=stage)
+                code, safe_message = classify_error(exc, stage=stage, provider=provider)
                 row.last_error_code = code
-                row.last_error_message = safe_error_message(exc)
+                row.last_error_message = safe_message
                 row.last_exception_type = exception_type(exc)
                 row.last_http_status = http_status(exc)
             row.updated_at = now

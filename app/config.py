@@ -21,7 +21,7 @@ class Settings:
     allow_nested_archive_extraction: bool = os.getenv("ALLOW_NESTED_ARCHIVE_EXTRACTION", "false").casefold() in {"1", "true", "yes", "on"}
     # AI is opt-in.  The default remains the no-network local provider so an
     # installation cannot accidentally send PHI to an external service.
-    ai_provider: str = os.getenv("AI_EXTRACTION_PROVIDER", os.getenv("AI_PROVIDER", "local_safe"))
+    ai_provider: str = os.getenv("AI_PROVIDER") or os.getenv("AI_EXTRACTION_PROVIDER", "local_safe")
     # Patient-level review is the primary multimodal workflow.  The value is
     # deliberately configurable so a deployment can stage the migration, but
     # the default is the holistic patient review requested by the product.
@@ -47,6 +47,9 @@ class Settings:
     openai_prompt_root: Path = Path(os.getenv("OPENAI_PROMPT_ROOT", "./prompts/openai"))
     app_environment: str = os.getenv("APP_ENV", "development")
     admin_mode: bool = os.getenv("ADMIN_MODE", "false").casefold() in {"1", "true", "yes", "on"}
+    openrouter_api_key: str | None = os.getenv("OPENROUTER_API_KEY") or None
+    openrouter_model: str = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+    openrouter_base_url: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 
 settings = Settings()

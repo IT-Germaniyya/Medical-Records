@@ -17,7 +17,7 @@ from app.schemas import JobStatus, ReportGenerationRequest, ReportRecord, Report
 from app.services.ingestion import ArchiveCorruptError, ArchivePasswordError, IngestionError, detect_archive_type
 from app.services.reports import ReportGenerator
 from app.services.providers import PatientLevelAIError
-from app.services.providers import OpenAIMedicalVisionProvider
+from app.services.providers import OpenAIMedicalVisionProvider, OpenRouterMedicalVisionProvider
 from app.services.ai_diagnostics import AIDiagnosticsStore, safe_error_message
 
 app = FastAPI(title="Medical Records Digitization MVP", version="0.1.0")
@@ -25,7 +25,9 @@ repository = RecordRepository(make_session_factory())
 pipeline = PatientPipeline(repository, settings)
 report_generator = ReportGenerator(repository, settings)
 ai_diagnostic_store = AIDiagnosticsStore(repository.session_factory)
-ai_diagnostic_store.mark_runtime(role="api", provider=settings.ai_provider, model=settings.openai_medical_model, api_key_configured=bool(settings.openai_api_key))
+_configured_model = settings.openrouter_model if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_medical_model
+_configured_key = settings.openrouter_api_key if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_api_key
+ai_diagnostic_store.mark_runtime(role="api", provider=settings.ai_provider, model=_configured_model, api_key_configured=bool(_configured_key))
 
 
 class IngestRequest(BaseModel):
@@ -38,6 +40,10 @@ class ReviewRequest(BaseModel):
     review_status: ReviewStatus
     reviewer_id: str | None = None
     edited_value: str | None = None
+
+
+class AIComparisonRequest(BaseModel):
+    patient_id: str
 
 
 @app.get("/health")
@@ -53,7 +59,14 @@ def _technical_details_enabled() -> bool:
 def get_ai_diagnostics() -> dict[str, object]:
     """Return redacted provider diagnostics; no request payloads or secrets."""
 
-    return ai_diagnostic_store.snapshot(include_technical=_technical_details_enabled())
+    snapshot = ai_diagnostic_store.snapshot(include_technical=_technical_details_enabled())
+    snapshot.update({
+        "configured_provider": settings.ai_provider,
+        "configured_model": settings.openrouter_model if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_medical_model,
+        "provider_options": ["openai", "openrouter"],
+        "provider_switching": "environment_configuration",
+    })
+    return snapshot
 
 
 def _configured_openai_provider() -> OpenAIMedicalVisionProvider:
@@ -67,8 +80,87 @@ def _configured_openai_provider() -> OpenAIMedicalVisionProvider:
     return OpenAIMedicalVisionProvider(settings, diagnostics=ai_diagnostic_store)
 
 
+def _configured_current_provider() -> OpenAIMedicalVisionProvider | OpenRouterMedicalVisionProvider:
+    """Build the currently configured provider for the admin smoke tests."""
+
+    if settings.ai_provider.casefold().startswith("openrouter"):
+        if not settings.openrouter_api_key:
+            ai_diagnostic_store.mark_runtime(role="api", provider=settings.ai_provider, model=settings.openrouter_model, api_key_configured=False)
+            raise HTTPException(status_code=503, detail="OpenRouter API key is not configured")
+        if isinstance(pipeline.provider, OpenRouterMedicalVisionProvider):
+            return pipeline.provider
+        return OpenRouterMedicalVisionProvider(settings, diagnostics=ai_diagnostic_store)
+    return _configured_openai_provider()
+
+
+def _provider_for_comparison(name: str):
+    provider = name.casefold()
+    if provider == "openai":
+        if not settings.openai_api_key:
+            raise PatientLevelAIError("OpenAI API key is not configured")
+        return OpenAIMedicalVisionProvider(settings)
+    if provider == "openrouter":
+        if not settings.openrouter_api_key:
+            raise PatientLevelAIError("OpenRouter API key is not configured")
+        return OpenRouterMedicalVisionProvider(settings)
+    raise PatientLevelAIError("Unsupported comparison provider")
+
+
+def _deidentify_for_comparison(record: StructuredRecord) -> dict[str, object]:
+    """Remove direct identifiers while retaining comparable clinical facts."""
+
+    source = record.ai_clinical_review or record.model_dump(mode="json", include={
+        "patient", "diagnoses", "medications", "laboratory_results", "growth_measurements", "verification_queue",
+    })
+    redacted_keys = {"patient_id", "full_name", "patient_name", "hospital_file_number", "mrn", "address", "date_of_birth", "source_file", "original_filename", "filename"}
+    omitted_text_keys = {"detailed_report_markdown", "erp_summary_markdown", "raw_text", "transcription", "report_text", "summary", "event", "reason"}
+
+    def redact(value: object, key: str = "") -> object:
+        if isinstance(value, dict):
+            output: dict[str, object] = {}
+            for name, item in value.items():
+                normalized = name.casefold()
+                if normalized in omitted_text_keys:
+                    continue
+                if normalized in redacted_keys:
+                    output[name] = "REDACTED"
+                elif normalized == "source_files" and isinstance(item, list):
+                    output[name] = [f"source_document_{index}" for index, _ in enumerate(item, start=1)]
+                else:
+                    output[name] = redact(item, name)
+            return output
+        if isinstance(value, list):
+            return [redact(item, key) for item in value]
+        return value
+
+    return redact(source)  # type: ignore[return-value]
+
+
+@app.post("/admin/ai/compare")
+def compare_ai_providers(request: AIComparisonRequest) -> dict[str, object]:
+    record = repository.get_record(request.patient_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="patient record not found")
+    redacted = _deidentify_for_comparison(record)
+    results: dict[str, object] = {}
+    for provider_name in ("openai", "openrouter"):
+        try:
+            provider = _provider_for_comparison(provider_name)
+            review = provider.review_deidentified_record(redacted)
+            results[provider_name] = {"status": "success", "model": provider.configuration.openai_medical_model, "review": review.model_dump(mode="json")}
+        except Exception as exc:
+            results[provider_name] = {"status": "failed", "message": safe_error_message(exc)}
+    return {
+        "patient_id": request.patient_id,
+        "deidentified": True,
+        "automatic_selection": False,
+        "comparison_fields": ["demographics", "diagnoses", "medications", "labs", "growth", "uncertain_items", "erp_summary"],
+        "results": results,
+    }
+
+
 def _run_ai_connection_test(stage: str) -> dict[str, object]:
-    provider = _configured_openai_provider()
+    provider = _configured_current_provider()
     try:
         result = provider.test_text_connection() if stage == "text_connection_test" else provider.test_vision_connection()
         return {"ok": True, "message": "AI connection test succeeded", "result": result, "diagnostics": ai_diagnostic_store.snapshot(include_technical=_technical_details_enabled())}

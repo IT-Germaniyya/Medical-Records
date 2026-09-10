@@ -7,6 +7,7 @@ services:
       STORAGE_ROOT: /var/lib/medical-data
       OUTPUT_ROOT: /var/lib/medical-output
       AI_EXTRACTION_PROVIDER: ${AI_EXTRACTION_PROVIDER:-local_safe}
+      AI_PROVIDER: ${AI_PROVIDER:-}
       AI_EXTRACTION_MODE: ${AI_EXTRACTION_MODE:-patient_level}
       LEGACY_OCR_ENABLED: ${LEGACY_OCR_ENABLED:-false}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -27,6 +28,9 @@ services:
       APP_ENV: ${APP_ENV:-development}
       ADMIN_MODE: ${ADMIN_MODE:-false}
       OPENAI_PROMPT_ROOT: /service/prompts/openai
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/free}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
     volumes:
       - ./data:/var/lib/medical-data
       - ./output:/var/lib/medical-output
@@ -45,6 +49,7 @@ services:
       OUTPUT_ROOT: /var/lib/medical-output
       BATCH_INPUT: /var/lib/medical-data/incoming/patients
       AI_EXTRACTION_PROVIDER: ${AI_EXTRACTION_PROVIDER:-local_safe}
+      AI_PROVIDER: ${AI_PROVIDER:-}
       AI_EXTRACTION_MODE: ${AI_EXTRACTION_MODE:-patient_level}
       LEGACY_OCR_ENABLED: ${LEGACY_OCR_ENABLED:-false}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -65,6 +70,9 @@ services:
       APP_ENV: ${APP_ENV:-development}
       ADMIN_MODE: ${ADMIN_MODE:-false}
       OPENAI_PROMPT_ROOT: /service/prompts/openai
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/free}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
     volumes:
       - ./data:/var/lib/medical-data
       - ./output:/var/lib/medical-output

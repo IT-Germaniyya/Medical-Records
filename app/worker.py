@@ -17,9 +17,11 @@ def main() -> None:
     poll_seconds = max(5, int(os.getenv("WORKER_POLL_SECONDS", "30")))
     repository = RecordRepository(make_session_factory())
     diagnostics = AIDiagnosticsStore(repository.session_factory)
+    configured_model = settings.openrouter_model if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_medical_model
+    configured_key = settings.openrouter_api_key if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_api_key
     for _ in range(30):
         try:
-            diagnostics.mark_runtime(role="worker", provider=settings.ai_provider, model=settings.openai_medical_model, api_key_configured=bool(settings.openai_api_key))
+            diagnostics.mark_runtime(role="worker", provider=settings.ai_provider, model=configured_model, api_key_configured=bool(configured_key))
             break
         except Exception:
             # The API container applies migrations on startup; wait briefly if

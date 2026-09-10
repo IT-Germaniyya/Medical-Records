@@ -151,6 +151,10 @@ class OpenAIProviderConfigurationError(RuntimeError):
     """Raised when OpenAI is selected without a usable backend configuration."""
 
 
+class OpenRouterProviderConfigurationError(RuntimeError):
+    """Raised when OpenRouter is selected without a usable backend configuration."""
+
+
 class PatientLevelAIError(RuntimeError):
     """Raised when the required holistic patient review cannot be completed."""
 
@@ -282,13 +286,15 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
         "required": ["problem_list", "timeline", "longitudinal_trends", "physician_summary", "erp_summary", "overall_confidence"],
     }
 
-    def __init__(self, configuration: Settings = settings, *, client: Any | None = None, api_key: str | None = None, diagnostics: AIDiagnosticsStore | None = None) -> None:
+    def __init__(self, configuration: Settings = settings, *, client: Any | None = None, api_key: str | None = None, base_url: str | None = None, diagnostics: AIDiagnosticsStore | None = None) -> None:
         if api_key and not configuration.openai_api_key:
             # Explicit injection is intended for tests/secret managers; normal
             # deployments should rely on OPENAI_API_KEY in the environment.
             configuration = replace(configuration, openai_api_key=api_key)
         self.configuration = configuration
         self.diagnostics = diagnostics
+        self.base_url = base_url
+        self.configured_model = configuration.openai_medical_model
         self._request_slots = threading.BoundedSemaphore(max(1, configuration.ai_max_concurrent_requests))
         if not configuration.openai_api_key and client is None:
             raise OpenAIProviderConfigurationError("OPENAI_API_KEY is required when AI_EXTRACTION_PROVIDER=openai")
@@ -300,8 +306,20 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
             from openai import OpenAI
         except ImportError as exc:  # pragma: no cover - exercised in deployment image
             raise OpenAIProviderConfigurationError("install the optional openai dependency") from exc
-        self.client = OpenAI(api_key=configuration.openai_api_key, timeout=configuration.ai_request_timeout)
+        client_kwargs: dict[str, Any] = {"api_key": configuration.openai_api_key, "timeout": configuration.ai_request_timeout}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
         self._mark_runtime()
+
+    def _create_response(self, **kwargs: Any) -> Any:
+        """Create a provider response; OpenRouter overrides this adapter."""
+
+        return self.client.responses.create(**kwargs)
+
+    @staticmethod
+    def _response_text(response: Any) -> str | None:
+        return getattr(response, "output_text", None)
 
     def _mark_runtime(self) -> None:
         if self.diagnostics is not None:
@@ -325,10 +343,12 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
             )
 
     def _log_failure(self, exc: BaseException, *, stage: str, model: str, retry_count: int) -> None:
-        code, safe_message = classify_error(exc, stage=stage)
+        code, safe_message = classify_error(exc, stage=stage, provider=self.name)
+        provider_label = "OpenRouter" if self.name == "openrouter" else "OpenAI"
         if self.configuration.ai_debug:
             logger.exception(
-                "OpenAI request failed stage=%s model=%s code=%s retry_count=%s message=%s",
+                "%s request failed stage=%s model=%s code=%s retry_count=%s message=%s",
+                provider_label,
                 stage,
                 model,
                 code,
@@ -337,7 +357,8 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
             )
         else:
             logger.warning(
-                "OpenAI request failed stage=%s model=%s code=%s retry_count=%s message=%s",
+                "%s request failed stage=%s model=%s code=%s retry_count=%s message=%s",
+                provider_label,
                 stage,
                 model,
                 code,
@@ -356,13 +377,13 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
             last_attempt = attempt
             try:
                 with self._request_slots:
-                    response = self.client.responses.create(
+                    response = self._create_response(
                         model=model,
                         input="Reply with exactly OK.",
                         store=False,
                         timeout=self.configuration.ai_request_timeout,
                     )
-                if not getattr(response, "output_text", None):
+                if not self._response_text(response):
                     raise ValueError("empty text test response")
                 self._record_request(model=model, stage=stage, retry_count=attempt, started=started, success=True)
                 if self.diagnostics is not None:
@@ -372,7 +393,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
                 if attempt >= self.configuration.ai_max_retries or not self._retryable(exc):
                     self._record_request(model=model, stage=stage, retry_count=attempt, started=started, success=False, exc=exc)
                     self._log_failure(exc, stage=stage, model=model, retry_count=attempt)
-                    code, safe_message = classify_error(exc, stage=stage)
+                    code, safe_message = classify_error(exc, stage=stage, provider=self.name)
                     raise PatientLevelAIError(safe_message) from exc
                 time.sleep(min(2**attempt, 8))
         raise PatientLevelAIError("OpenAI request failed")
@@ -410,8 +431,8 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
         for attempt in range(self.configuration.ai_max_retries + 1):
             try:
                 with self._request_slots:
-                    response = self.client.responses.create(model=model, input=payload, store=False, timeout=self.configuration.ai_request_timeout)
-                if not getattr(response, "output_text", None):
+                    response = self._create_response(model=model, input=payload, store=False, timeout=self.configuration.ai_request_timeout)
+                if not self._response_text(response):
                     raise ValueError("empty vision test response")
                 self._record_request(model=model, stage=stage, retry_count=attempt, started=started, success=True)
                 if self.diagnostics is not None:
@@ -421,7 +442,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
                 if attempt >= self.configuration.ai_max_retries or not self._retryable(exc):
                     self._record_request(model=model, stage=stage, retry_count=attempt, started=started, success=False, exc=exc)
                     self._log_failure(exc, stage=stage, model=model, retry_count=attempt)
-                    code, safe_message = classify_error(exc, stage=stage)
+                    code, safe_message = classify_error(exc, stage=stage, provider=self.name)
                     raise PatientLevelAIError(safe_message) from exc
                 time.sleep(min(2**attempt, 8))
         raise PatientLevelAIError("OpenAI request failed")
@@ -531,7 +552,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
         for attempt in range(self.configuration.ai_max_retries + 1):
             try:
                 with self._request_slots:
-                    response = self.client.responses.create(
+                    response = self._create_response(
                         model=self.configuration.openai_medical_model,
                         instructions=instructions,
                         input=payload,
@@ -539,7 +560,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
                         store=False,
                         timeout=self.configuration.ai_request_timeout,
                     )
-                raw = getattr(response, "output_text", None)
+                raw = self._response_text(response)
                 if not raw:
                     raise ValueError("empty patient-level response")
                 result = PatientLevelReview.model_validate(json.loads(raw))
@@ -551,10 +572,47 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
                 if attempt >= self.configuration.ai_max_retries or not self._retryable(exc):
                     self._record_request(model=self.configuration.openai_medical_model, stage="patient_review", retry_count=attempt, started=started, success=False, exc=exc)
                     self._log_failure(exc, stage="patient_review", model=self.configuration.openai_medical_model, retry_count=attempt)
-                    _, safe_message = classify_error(exc, stage="patient_review")
+                    _, safe_message = classify_error(exc, stage="patient_review", provider=self.name)
                     raise PatientLevelAIError(safe_message) from exc
                 time.sleep(min(2**attempt, 8))
         raise PatientLevelAIError("AI medical review could not be completed")
+
+    def review_deidentified_record(self, payload: dict[str, Any]) -> PatientLevelReview:
+        """Run the same canonical review schema over a de-identified record.
+
+        Comparison mode deliberately receives only redacted structured facts;
+        it never sends the patient's original files or identifiers.
+        """
+
+        stage = "comparison_review"
+        instructions = (
+            "Review this de-identified structured medical record conservatively. Use only documented facts in the payload. "
+            "Never invent dates, doses, diagnoses, percentiles, allergies, or identifiers. Preserve uncertainty, conflicts, and source references. "
+            "Return the exact patient-level schema, including a detailed report and ERP summary."
+        )
+        payload_input = [{"role": "user", "content": [{"type": "input_text", "text": instructions + "\nREDACTED RECORD:\n" + json.dumps(payload, ensure_ascii=False)}]}]
+        started = time.monotonic()
+        try:
+            with self._request_slots:
+                response = self._create_response(
+                    model=self.configuration.openai_medical_model,
+                    instructions=instructions,
+                    input=payload_input,
+                    text={"format": {"type": "json_schema", "name": "patient_level_medical_review", "strict": True, "schema": self._PATIENT_REVIEW_SCHEMA}},
+                    store=False,
+                    timeout=self.configuration.ai_request_timeout,
+                )
+            raw = self._response_text(response)
+            if not raw:
+                raise ValueError("empty comparison response")
+            result = PatientLevelReview.model_validate(json.loads(raw))
+            self._record_request(model=self.configuration.openai_medical_model, stage=stage, retry_count=0, started=started, success=True)
+            return result
+        except Exception as exc:
+            self._record_request(model=self.configuration.openai_medical_model, stage=stage, retry_count=0, started=started, success=False, exc=exc)
+            self._log_failure(exc, stage=stage, model=self.configuration.openai_medical_model, retry_count=0)
+            _, safe_message = classify_error(exc, stage=stage, provider=self.name)
+            raise PatientLevelAIError(safe_message) from exc
 
     def _synthesize_patient_reviews(self, reviews: list[PatientLevelReview]) -> PatientLevelReview:
         """Synthesize multimodal group reviews into the same canonical schema."""
@@ -568,7 +626,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
         started = time.monotonic()
         try:
             with self._request_slots:
-                response = self.client.responses.create(
+                response = self._create_response(
                     model=self.configuration.openai_summary_model,
                     instructions=instructions,
                     input=payload,
@@ -576,7 +634,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
                     store=False,
                     timeout=self.configuration.ai_request_timeout,
                 )
-            raw = getattr(response, "output_text", None)
+            raw = self._response_text(response)
             if not raw:
                 raise ValueError("empty patient-level synthesis response")
             result = PatientLevelReview.model_validate(json.loads(raw))
@@ -585,7 +643,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
         except Exception as exc:
             self._record_request(model=self.configuration.openai_summary_model, stage="patient_synthesis", retry_count=0, started=started, success=False, exc=exc)
             self._log_failure(exc, stage="patient_synthesis", model=self.configuration.openai_summary_model, retry_count=0)
-            _, safe_message = classify_error(exc, stage="patient_synthesis")
+            _, safe_message = classify_error(exc, stage="patient_synthesis", provider=self.name)
             raise PatientLevelAIError(safe_message) from exc
 
     def synthesize(self, structured_facts: dict[str, Any]) -> ClinicalSynthesis | None:
@@ -602,7 +660,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
         for attempt in range(self.configuration.ai_max_retries + 1):
             try:
                 with self._request_slots:
-                    response = self.client.responses.create(
+                    response = self._create_response(
                         model=self.configuration.openai_reasoning_model,
                         instructions=instructions,
                         input=payload,
@@ -610,7 +668,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
                         store=False,
                         timeout=self.configuration.ai_request_timeout,
                     )
-                raw = getattr(response, "output_text", None)
+                raw = self._response_text(response)
                 if not raw:
                     raise ValueError("empty synthesis response")
                 synthesis = ClinicalSynthesis.model_validate(json.loads(raw))
@@ -668,7 +726,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
         for attempt in range(self.configuration.ai_max_retries + 1):
             try:
                 with self._request_slots:
-                    response = self.client.responses.create(
+                    response = self._create_response(
                         model=model,
                         instructions=instructions,
                         input=payload,
@@ -676,7 +734,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
                         store=False,
                         timeout=self.configuration.ai_request_timeout,
                     )
-                raw = getattr(response, "output_text", None)
+                raw = self._response_text(response)
                 if not raw:
                     raise ValueError("empty structured response")
                 parsed = MedicalPageExtraction.model_validate(json.loads(raw))
@@ -797,12 +855,141 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
             return data
 
 
+class OpenRouterMedicalVisionProvider(OpenAIMedicalVisionProvider):
+    """OpenRouter's OpenAI-compatible chat-completions multimodal provider.
+
+    The canonical patient schema and safety instructions remain inherited from
+    the OpenAI provider.  Only transport adaptation differs: Responses input
+    items are translated to chat message content, and PDF file inputs are
+    rendered to page images because OpenRouter chat models accept image parts
+    but do not expose the Responses ``input_file`` contract uniformly.
+    """
+
+    name = "openrouter"
+    version = "openrouter-chat-v1"
+
+    def __init__(self, configuration: Settings = settings, *, client: Any | None = None, diagnostics: AIDiagnosticsStore | None = None) -> None:
+        if not configuration.openrouter_api_key and client is None:
+            raise OpenRouterProviderConfigurationError("OPENROUTER_API_KEY is required when AI_PROVIDER=openrouter")
+        model = configuration.openrouter_model
+        router_configuration = replace(
+            configuration,
+            openai_api_key=configuration.openrouter_api_key,
+            openai_medical_model=model,
+            openai_fast_model=model,
+            openai_reasoning_model=model,
+            openai_summary_model=model,
+        )
+        super().__init__(router_configuration, client=client, base_url=configuration.openrouter_base_url, diagnostics=diagnostics)
+        self.openrouter_model = model
+        self.openrouter_base_url = configuration.openrouter_base_url
+        self.configured_model = model
+
+    def _create_response(self, **kwargs: Any) -> Any:
+        model = kwargs.pop("model")
+        instructions = kwargs.pop("instructions", None)
+        input_value = kwargs.pop("input", "")
+        text = kwargs.pop("text", None)
+        timeout = kwargs.pop("timeout", None)
+        kwargs.pop("store", None)
+        messages = self._to_chat_messages(input_value, instructions)
+        request: dict[str, Any] = {"model": model, "messages": messages}
+        if text:
+            response_format = self._chat_response_format(text)
+            if response_format:
+                request["response_format"] = response_format
+        if timeout is not None:
+            request["timeout"] = timeout
+        return self.client.chat.completions.create(**request)
+
+    @staticmethod
+    def _response_text(response: Any) -> str | None:
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            return None
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", None) if message is not None else None
+        if isinstance(content, list):
+            return "".join(str(item.get("text", "")) for item in content if isinstance(item, dict)) or None
+        return content if isinstance(content, str) else None
+
+    @staticmethod
+    def _chat_response_format(text: dict[str, Any]) -> dict[str, Any] | None:
+        fmt = text.get("format") if isinstance(text, dict) else None
+        if not isinstance(fmt, dict) or fmt.get("type") != "json_schema":
+            return None
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": fmt.get("name", "medical_record_output"),
+                "strict": bool(fmt.get("strict", True)),
+                "schema": fmt.get("schema", {}),
+            },
+        }
+
+    def _to_chat_messages(self, input_value: Any, instructions: str | None) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        if instructions:
+            messages.append({"role": "system", "content": instructions})
+        if isinstance(input_value, str):
+            messages.append({"role": "user", "content": input_value})
+            return messages
+        for message in input_value or []:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            if isinstance(content, str):
+                messages.append({"role": role, "content": content})
+                continue
+            parts: list[dict[str, Any]] = []
+            for part in content or []:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type == "input_text":
+                    parts.append({"type": "text", "text": part.get("text", "")})
+                elif part_type == "input_image":
+                    image_url: dict[str, Any] = {"url": part.get("image_url", "")}
+                    if part.get("detail"):
+                        image_url["detail"] = part["detail"]
+                    parts.append({"type": "image_url", "image_url": image_url})
+                elif part_type == "input_file":
+                    parts.extend(self._pdf_file_parts(part))
+            messages.append({"role": role, "content": parts})
+        return messages
+
+    def _pdf_file_parts(self, part: dict[str, Any]) -> list[dict[str, Any]]:
+        file_data = part.get("file_data") or ""
+        if not isinstance(file_data, str) or "," not in file_data:
+            return [{"type": "text", "text": "[Source file could not be prepared for this provider; verify it manually.]"}]
+        try:
+            try:
+                import pymupdf as fitz  # type: ignore
+            except ImportError:
+                import fitz  # type: ignore
+
+            raw = __import__("base64").b64decode(file_data.split(",", 1)[1])
+            document = fitz.open(stream=raw, filetype="pdf")
+            output: list[dict[str, Any]] = []
+            for page in document:
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                encoded = b64encode(pixmap.tobytes("png")).decode("ascii")
+                output.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}", "detail": self.configuration.openai_image_detail}})
+            return output or [{"type": "text", "text": "[Empty PDF source; verify it manually.]"}]
+        except Exception:
+            return [{"type": "text", "text": "[PDF source could not be prepared for this provider; verify it manually.]"}]
+
+
 MedicalAIProvider = DocumentVisionProvider
 
 
 def provider_for_settings(configuration: Settings = settings, *, diagnostics: AIDiagnosticsStore | None = None) -> DocumentVisionProvider:
     """Build the configured provider without ever passing secrets to the UI."""
 
-    if configuration.ai_provider.casefold() in {"openai", "openai_vision", "openai_medical"}:
+    provider = configuration.ai_provider.casefold()
+    if provider in {"openai", "openai_vision", "openai_medical"}:
         return OpenAIMedicalVisionProvider(configuration, diagnostics=diagnostics)
+    if provider in {"openrouter", "openrouter_vision", "openrouter_medical"}:
+        return OpenRouterMedicalVisionProvider(configuration, diagnostics=diagnostics)
     return LocalSafeProvider()
