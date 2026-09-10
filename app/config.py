@@ -45,6 +45,8 @@ class Settings:
     ai_pages_per_request: int = int(os.getenv("AI_PAGES_PER_REQUEST", "3"))
     ai_debug: bool = os.getenv("AI_DEBUG", "false").casefold() in {"1", "true", "yes", "on"}
     openai_prompt_root: Path = Path(os.getenv("OPENAI_PROMPT_ROOT", "./prompts/openai"))
+    app_environment: str = os.getenv("APP_ENV", "development")
+    admin_mode: bool = os.getenv("ADMIN_MODE", "false").casefold() in {"1", "true", "yes", "on"}
 
 
 settings = Settings()

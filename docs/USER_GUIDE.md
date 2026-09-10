@@ -35,6 +35,7 @@ The workspace tabs are:
 - **Timeline**, **Problems**, **Labs**, **Medications**, and **Growth / Vitals**: structured clinical views.
 - **Review Items**: only uncertain or high-risk fields requiring a human decision.
 - **AI Clinical Review**: the holistic clinical summary, documented diagnoses, active problems, key investigations, medication history, pediatric/growth assessment, and uncertain/illegible items before report generation.
+- **AI diagnostics** (`/admin/ai`): administrators can run text and synthetic-vision connection tests. The page exposes only redacted error metadata (provider, model, HTTP status, request stage, retry count, and timestamp) in development/admin mode; secrets and patient payloads are never shown. Patient-level processing remains blocked until both checks pass.
 - **Reports**: generate and retrieve both report types.
 
 Use **Reprocess with AI** to invalidate the current reconstruction and create a new review version without deleting earlier report versions.

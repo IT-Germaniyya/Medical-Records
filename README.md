@@ -13,6 +13,7 @@ A conservative, traceable prototype for digitizing one legacy patient folder int
 - Produces the MVP files requested per patient: `structured_record.json`, `physician_summary.txt`, `timeline.json`, and `verification_queue.json`, plus CSV, HTML, audit, patient JSON, and FHIR-style exports.
 - Supports resumable batch processing: a completed patient is not processed again unless `--no-resume` is passed.
 - The workspace exposes an **AI Clinical Review** tab and **Reprocess with AI** action. Each review stores its version, model, prompt version, source hash, and creation time; generated reports reference the review version used.
+- The **AI diagnostics** page (`/admin/ai`) shows redacted provider health, API/worker configuration visibility, last request metadata, latency, and safe error categories. **Test AI Connection** sends a minimal text-only request and **Test Vision Extraction** uses a deterministic synthetic image; patient processing is blocked until both tests succeed.
 
 ## Deliberate safety boundaries
 

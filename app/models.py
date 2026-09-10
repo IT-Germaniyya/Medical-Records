@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -210,4 +210,32 @@ class ReportGenerationJobModel(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class AIDiagnosticModel(Base):
+    """Redacted, aggregate diagnostics shared by the API and worker."""
+
+    __tablename__ = "ai_diagnostics"
+    diagnostic_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="unknown")
+    api_key_configured: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    worker_api_key_configured: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_request_status: Mapped[str | None] = mapped_column(String(32))
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    last_error_message: Mapped[str | None] = mapped_column(Text)
+    last_exception_type: Mapped[str | None] = mapped_column(String(255))
+    last_http_status: Mapped[int | None] = mapped_column(Integer)
+    last_request_stage: Mapped[str | None] = mapped_column(String(64))
+    last_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_request_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_successful_request: Mapped[datetime | None] = mapped_column(DateTime)
+    last_text_success_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_text_success_model: Mapped[str | None] = mapped_column(String(128))
+    last_vision_success_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_vision_success_model: Mapped[str | None] = mapped_column(String(128))
+    average_latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)

@@ -9,16 +9,27 @@ from app.config import settings
 from app.db import make_session_factory
 from app.pipeline import PatientPipeline
 from app.repository import RecordRepository
+from app.services.ai_diagnostics import AIDiagnosticsStore
 
 
 def main() -> None:
     root = Path(os.getenv("BATCH_INPUT", "/var/lib/medical-data/incoming/patients"))
     poll_seconds = max(5, int(os.getenv("WORKER_POLL_SECONDS", "30")))
+    repository = RecordRepository(make_session_factory())
+    diagnostics = AIDiagnosticsStore(repository.session_factory)
+    for _ in range(30):
+        try:
+            diagnostics.mark_runtime(role="worker", provider=settings.ai_provider, model=settings.openai_medical_model, api_key_configured=bool(settings.openai_api_key))
+            break
+        except Exception:
+            # The API container applies migrations on startup; wait briefly if
+            # the worker wins the initial container race.
+            sleep(2)
     while True:
         if root.is_dir():
             for folder in (item for item in root.iterdir() if item.is_dir()):
                 try:
-                    PatientPipeline(RecordRepository(make_session_factory()), settings).process(folder, resume=True)
+                    PatientPipeline(repository, settings).process(folder, resume=True)
                 except Exception:
                     # Do not emit source filenames/content: they may contain PHI.
                     pass

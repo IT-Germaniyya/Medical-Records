@@ -20,6 +20,7 @@ from app.services.ingestion import ArchiveLimits, IngestionError, extract_archiv
 from app.services.preprocessing import preprocess
 from app.ai_schemas import PatientBundleItem, PatientLevelReview
 from app.services.providers import MedicalAIProvider, PageAnalysis, PatientLevelAIError, provider_for_settings
+from app.services.ai_diagnostics import AIDiagnosticsStore
 from app.services.validation import apply_confidence_policy, apply_rule_validations
 
 
@@ -35,13 +36,16 @@ class PatientPipeline:
     def __init__(self, repository: RecordRepository, configuration: Settings = settings, provider: MedicalAIProvider | None = None):
         self.repository = repository
         self.configuration = configuration
-        self.provider = provider or provider_for_settings(configuration)
+        self.diagnostics = AIDiagnosticsStore(repository.session_factory)
+        self.provider = provider or provider_for_settings(configuration, diagnostics=self.diagnostics)
 
     def process(self, source: Path, patient_id: str | None = None, resume: bool = True, demographics: dict[str, str | None] | None = None, source_mime_type: str | None = None) -> ProcessingResult:
         archive_result = None
         archive_root = None
         warnings: list[str] = []
         try:
+            if self._use_patient_level_review() and hasattr(self.provider, "test_text_connection") and not self.diagnostics.is_ready(provider=getattr(self.provider, "name", "openai"), model=self.configuration.openai_medical_model):
+                raise PatientLevelAIError("AI diagnostics are not ready: run Test AI Connection and Test Vision Extraction before processing patient records")
             if source.is_file():
                 archive_kind = detect_archive_type(source, source_mime_type)
                 if archive_kind:

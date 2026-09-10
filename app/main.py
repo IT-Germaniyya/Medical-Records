@@ -17,11 +17,15 @@ from app.schemas import JobStatus, ReportGenerationRequest, ReportRecord, Report
 from app.services.ingestion import ArchiveCorruptError, ArchivePasswordError, IngestionError, detect_archive_type
 from app.services.reports import ReportGenerator
 from app.services.providers import PatientLevelAIError
+from app.services.providers import OpenAIMedicalVisionProvider
+from app.services.ai_diagnostics import AIDiagnosticsStore, safe_error_message
 
 app = FastAPI(title="Medical Records Digitization MVP", version="0.1.0")
 repository = RecordRepository(make_session_factory())
 pipeline = PatientPipeline(repository, settings)
 report_generator = ReportGenerator(repository, settings)
+ai_diagnostic_store = AIDiagnosticsStore(repository.session_factory)
+ai_diagnostic_store.mark_runtime(role="api", provider=settings.ai_provider, model=settings.openai_medical_model, api_key_configured=bool(settings.openai_api_key))
 
 
 class IngestRequest(BaseModel):
@@ -41,12 +45,54 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _technical_details_enabled() -> bool:
+    return bool(settings.ai_debug or settings.admin_mode or settings.app_environment.casefold() in {"development", "dev", "test"})
+
+
+@app.get("/admin/ai")
+def get_ai_diagnostics() -> dict[str, object]:
+    """Return redacted provider diagnostics; no request payloads or secrets."""
+
+    return ai_diagnostic_store.snapshot(include_technical=_technical_details_enabled())
+
+
+def _configured_openai_provider() -> OpenAIMedicalVisionProvider:
+    if settings.ai_provider.casefold() not in {"openai", "openai_vision", "openai_medical"}:
+        raise HTTPException(status_code=503, detail="OpenAI provider is not enabled")
+    if not settings.openai_api_key:
+        ai_diagnostic_store.mark_runtime(role="api", provider=settings.ai_provider, model=settings.openai_medical_model, api_key_configured=False)
+        raise HTTPException(status_code=503, detail="OpenAI API key is not configured")
+    if isinstance(pipeline.provider, OpenAIMedicalVisionProvider):
+        return pipeline.provider
+    return OpenAIMedicalVisionProvider(settings, diagnostics=ai_diagnostic_store)
+
+
+def _run_ai_connection_test(stage: str) -> dict[str, object]:
+    provider = _configured_openai_provider()
+    try:
+        result = provider.test_text_connection() if stage == "text_connection_test" else provider.test_vision_connection()
+        return {"ok": True, "message": "AI connection test succeeded", "result": result, "diagnostics": ai_diagnostic_store.snapshot(include_technical=_technical_details_enabled())}
+    except PatientLevelAIError as exc:
+        snapshot = ai_diagnostic_store.snapshot(include_technical=_technical_details_enabled())
+        raise HTTPException(status_code=503, detail={"message": str(exc), "diagnostics": snapshot}) from exc
+
+
+@app.post("/admin/ai/test-connection")
+def test_ai_connection() -> dict[str, object]:
+    return _run_ai_connection_test("text_connection_test")
+
+
+@app.post("/admin/ai/test-vision")
+def test_ai_vision() -> dict[str, object]:
+    return _run_ai_connection_test("vision_connection_test")
+
+
 @app.post("/ingestions", response_model=StructuredRecord)
 def ingest(request: IngestRequest) -> StructuredRecord:
     try:
         return pipeline.process(Path(request.patient_folder), request.patient_id, request.resume).record
     except PatientLevelAIError as exc:
-        raise HTTPException(status_code=503, detail="AI medical review could not be completed.") from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, DuplicateSourceError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -114,9 +160,10 @@ def _run_upload_job(job_id: str, source: Path, patient_id: str, metadata: dict[s
             repository.update_job(job_id, status="complete", progress=100, message="Clinical extraction complete")
         else:
             repository.update_job(job_id, status="complete", progress=100, message="Clinical extraction complete")
-    except PatientLevelAIError:
+    except PatientLevelAIError as exc:
         repository.mark_patient_failed(patient_id)
-        repository.update_job(job_id, status="failed", progress=100, message="AI medical review could not be completed.", error="AI medical review could not be completed")
+        message = safe_error_message(exc)
+        repository.update_job(job_id, status="failed", progress=100, message=message, error=message)
     except ArchivePasswordError:
         repository.mark_patient_failed(patient_id)
         repository.update_job(job_id, status="failed", progress=100, message="This archive is password protected. Please upload an unencrypted archive.", error="Password-protected archive")
@@ -142,9 +189,10 @@ def _run_ai_reprocess_job(job_id: str, patient_id: str) -> None:
         source = settings.storage_root / patient_id / "original"
         result = pipeline.process(source, patient_id=patient_id, resume=False)
         repository.update_job(job_id, status="complete", progress=100, message="Clinical extraction complete")
-    except PatientLevelAIError:
+    except PatientLevelAIError as exc:
         repository.mark_patient_failed(patient_id)
-        repository.update_job(job_id, status="failed", progress=100, message="AI medical review could not be completed.", error="AI medical review could not be completed")
+        message = safe_error_message(exc)
+        repository.update_job(job_id, status="failed", progress=100, message=message, error=message)
     except Exception as exc:
         repository.update_job(job_id, status="failed", progress=100, message="AI medical review could not be completed.", error=type(exc).__name__)
 

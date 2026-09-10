@@ -24,6 +24,8 @@ services:
       AI_MAX_RETRIES: ${AI_MAX_RETRIES:-2}
       AI_PAGES_PER_REQUEST: ${AI_PAGES_PER_REQUEST:-3}
       AI_DEBUG: ${AI_DEBUG:-false}
+      APP_ENV: ${APP_ENV:-development}
+      ADMIN_MODE: ${ADMIN_MODE:-false}
       OPENAI_PROMPT_ROOT: /service/prompts/openai
     volumes:
       - ./data:/var/lib/medical-data
@@ -60,6 +62,8 @@ services:
       AI_MAX_RETRIES: ${AI_MAX_RETRIES:-2}
       AI_PAGES_PER_REQUEST: ${AI_PAGES_PER_REQUEST:-3}
       AI_DEBUG: ${AI_DEBUG:-false}
+      APP_ENV: ${APP_ENV:-development}
+      ADMIN_MODE: ${ADMIN_MODE:-false}
       OPENAI_PROMPT_ROOT: /service/prompts/openai
     volumes:
       - ./data:/var/lib/medical-data
