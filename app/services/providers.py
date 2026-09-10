@@ -5,6 +5,7 @@ from base64 import b64encode
 from dataclasses import dataclass, replace
 from io import BytesIO
 import json
+import logging
 import mimetypes
 from pathlib import Path
 import threading
@@ -15,6 +16,9 @@ from pypdf import PdfReader
 
 from app.ai_schemas import ClinicalSynthesis, MedicalPageExtraction
 from app.config import Settings, settings
+
+
+logger = logging.getLogger("medicaldata.ai")
 
 
 @dataclass
@@ -182,7 +186,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
         self.configuration = configuration
         self._request_slots = threading.BoundedSemaphore(max(1, configuration.ai_max_concurrent_requests))
         if not configuration.openai_api_key and client is None:
-            raise OpenAIProviderConfigurationError("OPENAI_API_KEY is required when AI_PROVIDER=openai")
+            raise OpenAIProviderConfigurationError("OPENAI_API_KEY is required when AI_EXTRACTION_PROVIDER=openai")
         if client is not None:
             self.client = client
             return
@@ -223,6 +227,8 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
             first_model != self.configuration.openai_medical_model
             and first.confidence < self.configuration.fast_model_min_confidence
         ):
+            if self.configuration.ai_debug:
+                logger.info("Fast extraction confidence %.2f is below threshold; running second pass for page %s", first.confidence, page_number)
             second = self._request(
                 model=self.configuration.openai_medical_model,
                 source_filename=source_filename,
@@ -235,6 +241,8 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
             )
             second.retried_with_strong_model = True
             return second
+        if self.configuration.ai_debug:
+            logger.info("Second pass not required for page %s", page_number)
         return first
 
     def synthesize(self, structured_facts: dict[str, Any]) -> ClinicalSynthesis | None:
@@ -245,6 +253,9 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
             "Separate documented facts from uncertainty and return only the requested JSON schema."
         )
         payload = [{"role": "user", "content": [{"type": "input_text", "text": json.dumps(structured_facts, ensure_ascii=False, default=str)}]}]
+        started = time.monotonic()
+        if self.configuration.ai_debug:
+            logger.info("Sending validated structured facts to OpenAI for longitudinal synthesis")
         for attempt in range(self.configuration.ai_max_retries + 1):
             try:
                 with self._request_slots:
@@ -259,7 +270,10 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
                 raw = getattr(response, "output_text", None)
                 if not raw:
                     raise ValueError("empty synthesis response")
-                return ClinicalSynthesis.model_validate(json.loads(raw))
+                synthesis = ClinicalSynthesis.model_validate(json.loads(raw))
+                if self.configuration.ai_debug:
+                    logger.info("Longitudinal synthesis received in %.1f seconds", time.monotonic() - started)
+                return synthesis
             except Exception as exc:
                 if attempt >= self.configuration.ai_max_retries or not self._retryable(exc):
                     return None
@@ -305,6 +319,9 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
             content.append({"type": "input_image", "image_url": f"data:{media_type};base64,{b64encode(visual_data).decode('ascii')}"})
         payload = [{"role": "user", "content": content}]
         last_error = "request_failed"
+        started = time.monotonic()
+        if self.configuration.ai_debug:
+            logger.info("Sending page %s to OpenAI using model %s", page_number, model)
         for attempt in range(self.configuration.ai_max_retries + 1):
             try:
                 with self._request_slots:
@@ -320,6 +337,9 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
                 if not raw:
                     raise ValueError("empty structured response")
                 parsed = MedicalPageExtraction.model_validate(json.loads(raw))
+                if self.configuration.ai_debug:
+                    logger.info("OpenAI response received in %.1f seconds", time.monotonic() - started)
+                    logger.info("Extraction stored for page %s", page_number)
                 return PageAnalysis(text=parsed.transcription or None, structured=parsed, confidence=parsed.overall_confidence, model=model, prompt_version=prompt_version)
             except Exception as exc:  # SDK exception classes vary between releases.
                 last_error = self._error_code(exc)

@@ -1,6 +1,6 @@
 """Opt-in smoke test for the configured OpenAI medical page provider.
 
-This command intentionally requires ``AI_PROVIDER=openai`` and
+This command intentionally requires ``AI_EXTRACTION_PROVIDER=openai`` and
 ``OPENAI_API_KEY`` in the backend environment. It never prints the key or raw
 request payload; use it only with an approved, de-identified test document.
 """
@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument("--document-type", default=None)
     args = parser.parse_args()
     if settings.ai_provider.casefold() not in {"openai", "openai_vision", "openai_medical"}:
-        parser.error("set AI_PROVIDER=openai to enable the real API test")
+        parser.error("set AI_EXTRACTION_PROVIDER=openai to enable the real API test")
     provider = OpenAIMedicalVisionProvider(settings)
     result = provider.extract_page(args.path, args.page, document_type_hint=args.document_type)
     print({
@@ -38,4 +38,3 @@ def main() -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-

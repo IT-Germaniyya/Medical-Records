@@ -21,18 +21,21 @@ class Settings:
     allow_nested_archive_extraction: bool = os.getenv("ALLOW_NESTED_ARCHIVE_EXTRACTION", "false").casefold() in {"1", "true", "yes", "on"}
     # AI is opt-in.  The default remains the no-network local provider so an
     # installation cannot accidentally send PHI to an external service.
-    ai_provider: str = os.getenv("AI_PROVIDER", "local_safe")
+    ai_provider: str = os.getenv("AI_EXTRACTION_PROVIDER", os.getenv("AI_PROVIDER", "local_safe"))
+    legacy_ocr_enabled: bool = os.getenv("LEGACY_OCR_ENABLED", "false").casefold() in {"1", "true", "yes", "on"}
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
-    openai_medical_model: str = os.getenv("OPENAI_MEDICAL_MODEL", "gpt-5.2")
-    openai_fast_model: str = os.getenv("OPENAI_FAST_MODEL", "gpt-5.2")
-    openai_reasoning_model: str = os.getenv("OPENAI_REASONING_MODEL", "gpt-5.2")
+    openai_medical_model: str = os.getenv("OPENAI_MEDICAL_MODEL", "gpt-5.6-sol")
+    openai_fast_model: str = os.getenv("OPENAI_FAST_MODEL", os.getenv("OPENAI_MEDICAL_MODEL", "gpt-5.6-sol"))
+    openai_reasoning_model: str = os.getenv("OPENAI_REASONING_MODEL", "gpt-5.6-sol")
     fast_model_min_confidence: float = float(os.getenv("FAST_MODEL_MIN_CONFIDENCE", "0.80"))
     auto_accept_confidence: float = float(os.getenv("AUTO_ACCEPT_CONFIDENCE", "0.95"))
     physician_review_confidence: float = float(os.getenv("PHYSICIAN_REVIEW_CONFIDENCE", "0.70"))
     ai_max_concurrent_requests: int = int(os.getenv("AI_MAX_CONCURRENT_REQUESTS", "4"))
-    ai_request_timeout: float = float(os.getenv("AI_REQUEST_TIMEOUT", "60"))
+    ai_request_timeout: float = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", os.getenv("AI_REQUEST_TIMEOUT", "90")))
     ai_max_retries: int = int(os.getenv("AI_MAX_RETRIES", "2"))
     ai_max_image_dimension: int = int(os.getenv("AI_MAX_IMAGE_DIMENSION", "4096"))
+    ai_pages_per_request: int = int(os.getenv("AI_PAGES_PER_REQUEST", "3"))
+    ai_debug: bool = os.getenv("AI_DEBUG", "false").casefold() in {"1", "true", "yes", "on"}
     openai_prompt_root: Path = Path(os.getenv("OPENAI_PROMPT_ROOT", "./prompts/openai"))
 
 

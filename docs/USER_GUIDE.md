@@ -22,7 +22,7 @@ To add documents to an existing patient, open that patient and select **Add docu
 
 ## Optional multimodal extraction
 
-The default `AI_PROVIDER=local_safe` mode never sends records over the network. After a privacy/security review and approval to use an external processor, set `AI_PROVIDER=openai` for the backend and worker only. Provide `OPENAI_API_KEY`, `OPENAI_MEDICAL_MODEL`, `OPENAI_FAST_MODEL`, and `OPENAI_REASONING_MODEL` through an untracked `.env` or a deployment secret manager. The key is never exposed to frontend JavaScript. The provider uses the Responses API with strict structured JSON, routes complex/handwritten pages to the medical model, retries transient failures, and sends uncertain fields to Review Items. Use `python -m app.tools.test_openai_extraction path/to/deidentified-page.jpg` only for an explicitly approved, de-identified smoke test.
+The default `AI_EXTRACTION_PROVIDER=local_safe` mode never sends records over the network. After a privacy/security review and approval to use an external processor, set `AI_EXTRACTION_PROVIDER=openai` for the backend and worker only. Provide `OPENAI_API_KEY`, `OPENAI_MEDICAL_MODEL`, and `OPENAI_REASONING_MODEL` through an untracked `.env` or a deployment secret manager. The key is never exposed to frontend JavaScript. The provider uses the Responses API with strict structured JSON, routes complex/handwritten pages to the medical model, retries transient failures, and sends uncertain fields to Review Items. Use `python -m app.tools.test_openai_extraction path/to/deidentified-page.jpg` only for an explicitly approved, de-identified smoke test.
 
 ## Search for a patient
 
