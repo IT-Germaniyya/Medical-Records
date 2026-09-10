@@ -15,12 +15,15 @@ A conservative, traceable prototype for digitizing one legacy patient folder int
 - The workspace exposes an **AI Clinical Review** tab and **Reprocess with AI** action. Each review stores its version, model, prompt version, source hash, and creation time; generated reports reference the review version used.
 - The **AI diagnostics** page (`/admin/ai`) shows redacted provider health, API/worker configuration visibility, last request metadata, latency, and safe error categories. **Test AI Connection** sends a minimal text-only request and **Test Vision Extraction** uses a deterministic synthetic image; patient processing is blocked until both tests succeed.
 - Provider selection is configuration-based: set `AI_PROVIDER=openai` or `AI_PROVIDER=openrouter` and restart both the API and worker. Configure OpenRouter with `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` (a fixed model slug or the default `openrouter/free`), and `OPENROUTER_BASE_URL`. The admin page shows the active provider/model and warns that free routing can vary between requests.
+- A fully local provider is available with `AI_PROVIDER=local`: it sends patient-level multimodal prompts only to Ollama at `LOCAL_AI_BASE_URL` using the configurable `LOCAL_AI_MODEL` (for example, a locally installed vision model). It requires no API key, never falls back to cloud providers, supports multi-image/PDF review, and can optionally augment the prompt with PaddleOCR-VL text via `LOCAL_OCR_ENABLED=true`.
 - The admin page can compare the same de-identified structured patient record through OpenAI and OpenRouter across demographics, diagnoses, medications, labs, growth, uncertain items, and ERP summary. Results are shown side by side and are never automatically selected by cost or score.
+- Local performance diagnostics include the latest page latency, patient-review latency, Ollama reachability/model status, GPU/CPU status, and reported GPU memory when Ollama exposes it.
 
 ## Deliberate safety boundaries
 
-- The local provider does **not** OCR images, interpret charts/ECGs, infer a diagnosis, calculate growth percentiles, correct abnormal labs, assign a dose, or assign ICD-10/SNOMED/LOINC codes.
+- The local provider can inspect document images, handwriting, tables, prescriptions, laboratory pages, and growth charts, but it does **not** claim clinical validation: it must not infer a diagnosis, calculate growth percentiles, correct abnormal labs, assign a dose, or assign ICD-10/SNOMED/LOINC codes. Optional PaddleOCR-VL output is only an additional local transcription aid.
 - OpenAI and OpenRouter are optional extraction aids, not clinical validation. Both transcribe before interpreting, never fill unreadable medication doses, preserve source references, and queue low-confidence or high-risk values for human review. Validate privacy, security, model behavior, and local regulatory requirements before enabling either provider for PHI.
+- Local AI remains an extraction aid, not clinical validation. A local model must still label illegible content, `needs_verification`, probable findings, and documented facts conservatively; no cloud fallback is attempted when Ollama is unavailable.
 - A diagnosis or medication extracted from text is still queued for medical review. Missing dose/frequency becomes a review item, never a guessed dose.
 - "No allergy extracted" is not reported as "no allergy." Undated information is not added to the chronological timeline.
 - This is a prototype, not a clinical decision-support system or production deployment. Perform security validation, clinical validation, and local regulatory review before using real patient data.
@@ -59,6 +62,16 @@ docker compose up --build
 ```
 
 The API applies the Alembic migration before starting. The image includes native Unar and `bsdtar` backends for RAR4/RAR5. The worker watches `data/incoming/patients/`; Redis is included as a future queue dependency. In production, replace the MVP polling worker with an authenticated task queue such as Celery/RQ and use a managed encrypted PostgreSQL service.
+
+### Local Ollama on Windows
+
+1. Install [Ollama for Windows](https://ollama.com/download/windows).
+2. Pull the configured vision model, for example `ollama pull qwen3-vl` (or use the slug configured in `LOCAL_AI_MODEL`).
+3. Verify it is available with `ollama list` and that Ollama is listening on `http://localhost:11434`.
+4. Set `AI_PROVIDER=local`, `LOCAL_AI_BASE_URL=http://host.docker.internal:11434`, and `LOCAL_AI_MODEL=<your-installed-vision-model>` in the untracked `.env`.
+5. Restart with `docker compose up -d --build`. Docker maps `host.docker.internal` for both API and worker containers; the Admin > AI page reports Ollama and GPU status.
+
+If Ollama or the selected model is unavailable, patient-level processing stops with a local diagnostic error. The application does not switch to OpenAI or OpenRouter automatically. PaddleOCR-VL is optional and must be installed separately in the API/worker image or runtime before setting `LOCAL_OCR_ENABLED=true`.
 
 ## Batch processing
 

@@ -12,13 +12,18 @@ from app.repository import RecordRepository
 from app.services.ai_diagnostics import AIDiagnosticsStore
 
 
+def _is_local_provider(provider: str) -> bool:
+    value = provider.casefold()
+    return value.startswith("local") or value in {"ollama", "ollama_local"}
+
+
 def main() -> None:
     root = Path(os.getenv("BATCH_INPUT", "/var/lib/medical-data/incoming/patients"))
     poll_seconds = max(5, int(os.getenv("WORKER_POLL_SECONDS", "30")))
     repository = RecordRepository(make_session_factory())
     diagnostics = AIDiagnosticsStore(repository.session_factory)
-    configured_model = settings.openrouter_model if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_medical_model
-    configured_key = settings.openrouter_api_key if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_api_key
+    configured_model = settings.local_ai_model if _is_local_provider(settings.ai_provider) else settings.openrouter_model if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_medical_model
+    configured_key = None if _is_local_provider(settings.ai_provider) else settings.openrouter_api_key if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_api_key
     for _ in range(30):
         try:
             diagnostics.mark_runtime(role="worker", provider=settings.ai_provider, model=configured_model, api_key_configured=bool(configured_key))

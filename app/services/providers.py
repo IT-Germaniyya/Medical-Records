@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from base64 import b64encode
+from base64 import b64decode, b64encode
 from dataclasses import dataclass, replace
 from io import BytesIO
 import json
@@ -11,6 +11,8 @@ from pathlib import Path
 import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit
+import ipaddress
 
 from pypdf import PdfReader
 
@@ -153,6 +155,10 @@ class OpenAIProviderConfigurationError(RuntimeError):
 
 class OpenRouterProviderConfigurationError(RuntimeError):
     """Raised when OpenRouter is selected without a usable backend configuration."""
+
+
+class LocalAIProviderConfigurationError(RuntimeError):
+    """Raised when the local Ollama provider cannot be configured safely."""
 
 
 class PatientLevelAIError(RuntimeError):
@@ -344,7 +350,7 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
 
     def _log_failure(self, exc: BaseException, *, stage: str, model: str, retry_count: int) -> None:
         code, safe_message = classify_error(exc, stage=stage, provider=self.name)
-        provider_label = "OpenRouter" if self.name == "openrouter" else "OpenAI"
+        provider_label = "OpenRouter" if self.name == "openrouter" else "Local AI" if self.name == "local" else "OpenAI"
         if self.configuration.ai_debug:
             logger.exception(
                 "%s request failed stage=%s model=%s code=%s retry_count=%s message=%s",
@@ -981,6 +987,281 @@ class OpenRouterMedicalVisionProvider(OpenAIMedicalVisionProvider):
             return [{"type": "text", "text": "[PDF source could not be prepared for this provider; verify it manually.]"}]
 
 
+class LocalMedicalVisionProvider(OpenAIMedicalVisionProvider):
+    """Patient-level multimodal extraction through a local Ollama server.
+
+    This deliberately reuses the canonical patient schema, prompts, validation,
+    provenance, and safety policy from the OpenAI provider.  Transport is a
+    local-only Ollama ``/api/generate`` request with images encoded in memory;
+    there is no cloud fallback and no API key.
+    """
+
+    name = "local"
+    version = "ollama-generate-v1"
+
+    def __init__(
+        self,
+        configuration: Settings = settings,
+        *,
+        http_client: Any | None = None,
+        diagnostics: AIDiagnosticsStore | None = None,
+    ) -> None:
+        model = configuration.local_ai_model.strip()
+        if not model:
+            raise LocalAIProviderConfigurationError("LOCAL_AI_MODEL is required when AI_PROVIDER=local")
+        base_url = configuration.local_ai_base_url.strip().rstrip("/")
+        if not base_url or not base_url.startswith(("http://", "https://")):
+            raise LocalAIProviderConfigurationError("LOCAL_AI_BASE_URL must be an http(s) URL")
+        parsed_base_url = urlsplit(base_url)
+        if parsed_base_url.username or parsed_base_url.password:
+            raise LocalAIProviderConfigurationError("LOCAL_AI_BASE_URL must not contain URL credentials")
+        hostname = (parsed_base_url.hostname or "").casefold().rstrip(".")
+        try:
+            local_host = ipaddress.ip_address(hostname).is_private or ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            local_host = hostname in {"localhost", "host.docker.internal", "ollama"} or hostname.endswith(".local") or "." not in hostname
+        if not local_host:
+            raise LocalAIProviderConfigurationError("LOCAL_AI_BASE_URL must point to a local/private Ollama host")
+        local_configuration = replace(
+            configuration,
+            openai_api_key=None,
+            openai_medical_model=model,
+            openai_fast_model=model,
+            openai_reasoning_model=model,
+            openai_summary_model=model,
+        )
+        # The parent constructor is used only for shared schemas, request
+        # accounting, and safety logic. It never contacts OpenAI when a client
+        # object is supplied; all network traffic goes through http_client.
+        super().__init__(local_configuration, client=object(), diagnostics=diagnostics)
+        self.local_ai_base_url = base_url
+        self.local_ai_model = model
+        if http_client is not None:
+            self.http_client = http_client
+        else:
+            try:
+                import httpx
+            except ImportError as exc:  # pragma: no cover - dependency is part of the service image
+                raise LocalAIProviderConfigurationError("install the httpx dependency for local AI") from exc
+            self.http_client = httpx.Client(
+                base_url=base_url,
+                timeout=configuration.ai_request_timeout,
+                trust_env=False,
+            )
+        self._ocr_engine: Any | None = None
+        self._ocr_unavailable_logged = False
+
+    def _create_response(self, **kwargs: Any) -> Any:
+        model = kwargs.pop("model")
+        instructions = kwargs.pop("instructions", None)
+        input_value = kwargs.pop("input", "")
+        text = kwargs.pop("text", None)
+        timeout = kwargs.pop("timeout", None)
+        kwargs.pop("store", None)
+        prompt, images = self._to_ollama_input(input_value, instructions)
+        request: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "images": images,
+            "stream": False,
+        }
+        output_format = self._ollama_response_format(text)
+        if output_format is not None:
+            request["format"] = output_format
+        response = self.http_client.post("/api/generate", json=request, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+
+    @staticmethod
+    def _response_text(response: Any) -> str | None:
+        if isinstance(response, dict):
+            value = response.get("response")
+            return value if isinstance(value, str) else None
+        value = getattr(response, "response", None)
+        return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _ollama_response_format(text: Any) -> dict[str, Any] | str | None:
+        if not isinstance(text, dict):
+            return None
+        fmt = text.get("format")
+        if not isinstance(fmt, dict):
+            return "json" if fmt == "json" else None
+        if fmt.get("type") == "json_schema":
+            # Ollama accepts a JSON schema directly in `format`.
+            return fmt.get("schema") or None
+        return fmt if fmt.get("type") == "object" else None
+
+    def _to_ollama_input(self, input_value: Any, instructions: str | None) -> tuple[str, list[str]]:
+        prompt_parts: list[str] = []
+        if instructions:
+            prompt_parts.append(instructions)
+        images: list[str] = []
+        if isinstance(input_value, str):
+            prompt_parts.append(input_value)
+            return "\n\n".join(prompt_parts), images
+        for message in input_value or []:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                prompt_parts.append(content)
+                continue
+            for part in content or []:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type == "input_text":
+                    prompt_parts.append(str(part.get("text", "")))
+                elif part_type == "input_image":
+                    raw = self._decode_data_url(part.get("image_url"))
+                    if raw is None:
+                        raise ValueError("image input could not be prepared locally")
+                    images.append(b64encode(raw).decode("ascii"))
+                    ocr_text = self._optional_ocr(raw)
+                    if ocr_text:
+                        prompt_parts.append("[Optional local PaddleOCR-VL text for the following image]\n" + ocr_text)
+                elif part_type == "input_file":
+                    rendered_pages = self._pdf_file_images(part)
+                    if not rendered_pages:
+                        raise ValueError("PDF input could not be prepared locally")
+                    for raw, page_number in rendered_pages:
+                        images.append(b64encode(raw).decode("ascii"))
+                        ocr_text = self._optional_ocr(raw)
+                        if ocr_text:
+                            prompt_parts.append(f"[Optional local PaddleOCR-VL text for PDF page {page_number}]\n{ocr_text}")
+        return "\n\n".join(part for part in prompt_parts if part), images
+
+    @staticmethod
+    def _decode_data_url(value: Any) -> bytes | None:
+        if not isinstance(value, str) or "," not in value or not value.startswith("data:"):
+            return None
+        try:
+            return b64decode(value.split(",", 1)[1], validate=True)
+        except Exception:
+            return None
+
+    def _pdf_file_images(self, part: dict[str, Any]) -> list[tuple[bytes, int]]:
+        raw_pdf = self._decode_data_url(part.get("file_data"))
+        if raw_pdf is None:
+            raise ValueError("PDF input could not be prepared locally")
+        try:
+            try:
+                import pymupdf as fitz  # type: ignore
+            except ImportError:  # pragma: no cover - older PyMuPDF releases
+                import fitz  # type: ignore
+            document = fitz.open(stream=raw_pdf, filetype="pdf")
+            pages: list[tuple[bytes, int]] = []
+            for index, page in enumerate(document, start=1):
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                pages.append((self._resize_image(bytes(pixmap.tobytes("png")), "image/png"), index))
+            return pages
+        except Exception as exc:
+            if self.configuration.ai_debug:
+                logger.exception("Local PDF page rendering failed")
+            raise ValueError("PDF input could not be prepared locally") from exc
+
+    def _optional_ocr(self, image_data: bytes) -> str | None:
+        if not self.configuration.local_ocr_enabled:
+            return None
+        try:
+            if self._ocr_engine is None:
+                from paddleocr import PaddleOCRVL  # type: ignore
+                self._ocr_engine = PaddleOCRVL()
+            try:
+                result = self._ocr_engine.predict(image_data)
+            except TypeError:
+                result = self._ocr_engine.predict(input=image_data)
+            return self._extract_ocr_text(result)
+        except ImportError:
+            if not self._ocr_unavailable_logged:
+                logger.warning("LOCAL_OCR_ENABLED=true but PaddleOCR-VL is not installed; continuing with local VLM images only")
+                self._ocr_unavailable_logged = True
+            return None
+        except Exception:
+            # OCR is an optional local augmentation. Never replace the image
+            # path or fall back to a cloud service when it fails.
+            if self.configuration.ai_debug:
+                logger.exception("Local PaddleOCR-VL augmentation failed")
+            return None
+
+    @staticmethod
+    def _extract_ocr_text(result: Any) -> str | None:
+        values: list[str] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+            elif isinstance(value, dict):
+                for key in ("text", "rec_texts", "texts", "content"):
+                    if key in value:
+                        visit(value[key])
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+            elif hasattr(value, "json"):
+                try:
+                    payload = value.json() if callable(value.json) else value.json
+                    visit(payload)
+                except Exception:
+                    pass
+
+        visit(result)
+        deduped = list(dict.fromkeys(values))
+        return "\n".join(deduped)[:20000] if deduped else None
+
+    def health(self) -> dict[str, Any]:
+        """Check only the configured local Ollama endpoint and GPU metadata."""
+
+        try:
+            tags_response = self.http_client.get("/api/tags", timeout=min(self.configuration.ai_request_timeout, 10))
+            tags_response.raise_for_status()
+            tags_payload = tags_response.json() or {}
+            models = tags_payload.get("models", []) if isinstance(tags_payload, dict) else []
+            names = [str(item.get("name", "")) for item in models if isinstance(item, dict)]
+            configured_model_base = self.local_ai_model.split(":", 1)[0]
+            model_available = any(name == self.local_ai_model or name.split(":", 1)[0] == configured_model_base for name in names)
+            gpu_status = "unknown"
+            gpu_memory_bytes: int | None = None
+            try:
+                ps_response = self.http_client.get("/api/ps", timeout=min(self.configuration.ai_request_timeout, 10))
+                ps_response.raise_for_status()
+                ps_payload = ps_response.json() or {}
+                running_models = ps_payload.get("models", []) if isinstance(ps_payload, dict) else []
+                vram_values = [int(item.get("size_vram", 0)) for item in running_models if isinstance(item, dict) and item.get("size_vram") is not None]
+                gpu_memory_bytes = sum(vram_values) if vram_values else 0
+                gpu_status = "gpu" if gpu_memory_bytes > 0 else "cpu_or_idle"
+            except Exception:
+                gpu_status = "unknown"
+            ollama_status = "healthy" if model_available else "model_missing"
+            if self.diagnostics is not None:
+                self.diagnostics.record_local_runtime(ollama_status=ollama_status, gpu_status=gpu_status, gpu_memory_bytes=gpu_memory_bytes)
+            return {
+                "status": ollama_status,
+                "base_url": self.local_ai_base_url,
+                "model": self.local_ai_model,
+                "model_available": model_available,
+                "available_models": names[:50],
+                "gpu_status": gpu_status,
+                "gpu_memory_bytes": gpu_memory_bytes,
+                "ocr_enabled": bool(self.configuration.local_ocr_enabled),
+            }
+        except Exception as exc:
+            if self.diagnostics is not None:
+                self.diagnostics.record_local_runtime(ollama_status="unavailable", gpu_status="unknown", gpu_memory_bytes=None)
+            return {
+                "status": "unavailable",
+                "base_url": self.local_ai_base_url,
+                "model": self.local_ai_model,
+                "model_available": False,
+                "available_models": [],
+                "gpu_status": "unknown",
+                "gpu_memory_bytes": None,
+                "ocr_enabled": bool(self.configuration.local_ocr_enabled),
+                "error": safe_error_message(exc),
+            }
+
+
 MedicalAIProvider = DocumentVisionProvider
 
 
@@ -992,4 +1273,6 @@ def provider_for_settings(configuration: Settings = settings, *, diagnostics: AI
         return OpenAIMedicalVisionProvider(configuration, diagnostics=diagnostics)
     if provider in {"openrouter", "openrouter_vision", "openrouter_medical"}:
         return OpenRouterMedicalVisionProvider(configuration, diagnostics=diagnostics)
+    if provider in {"local", "local_ai", "ollama", "ollama_local"}:
+        return LocalMedicalVisionProvider(configuration, diagnostics=diagnostics)
     return LocalSafeProvider()

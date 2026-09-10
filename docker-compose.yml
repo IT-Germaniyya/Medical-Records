@@ -31,6 +31,11 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/free}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      LOCAL_AI_BASE_URL: ${LOCAL_AI_BASE_URL:-http://host.docker.internal:11434}
+      LOCAL_AI_MODEL: ${LOCAL_AI_MODEL:-qwen3-vl}
+      LOCAL_OCR_ENABLED: ${LOCAL_OCR_ENABLED:-false}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/var/lib/medical-data
       - ./output:/var/lib/medical-output
@@ -73,6 +78,11 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/free}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      LOCAL_AI_BASE_URL: ${LOCAL_AI_BASE_URL:-http://host.docker.internal:11434}
+      LOCAL_AI_MODEL: ${LOCAL_AI_MODEL:-qwen3-vl}
+      LOCAL_OCR_ENABLED: ${LOCAL_OCR_ENABLED:-false}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/var/lib/medical-data
       - ./output:/var/lib/medical-output

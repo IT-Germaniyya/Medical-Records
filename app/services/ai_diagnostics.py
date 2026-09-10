@@ -57,7 +57,8 @@ def http_status(exc: BaseException) -> int | None:
 def classify_error(exc: BaseException, *, stage: str, provider: str = "openai") -> tuple[str, str]:
     """Map SDK/network/schema failures to safe, actionable product language."""
 
-    label = "OpenRouter" if provider.casefold().startswith("openrouter") else "OpenAI"
+    provider_key = provider.casefold()
+    label = "OpenRouter" if provider_key.startswith("openrouter") else "Local AI" if provider_key.startswith("local") else "OpenAI"
     name = type(exc).__name__.casefold()
     message = safe_error_message(exc).casefold()
     status = http_status(exc)
@@ -132,6 +133,10 @@ class AIDiagnosticsStore:
             row.request_count = int(row.request_count or 0) + 1
             previous_count = row.request_count - 1
             row.average_latency_ms = ((float(row.average_latency_ms or 0.0) * previous_count) + max(0.0, latency_ms)) / row.request_count
+            if stage == "page_extraction":
+                row.last_page_latency_ms = max(0.0, latency_ms)
+            elif stage in {"patient_review", "patient_synthesis"}:
+                row.last_patient_latency_ms = max(0.0, latency_ms)
             if success:
                 row.success_count = int(row.success_count or 0) + 1
                 row.last_successful_request = now
@@ -142,6 +147,21 @@ class AIDiagnosticsStore:
                 row.last_exception_type = exception_type(exc)
                 row.last_http_status = http_status(exc)
             row.updated_at = now
+            session.commit()
+
+    def record_local_runtime(
+        self,
+        *,
+        ollama_status: str,
+        gpu_status: str,
+        gpu_memory_bytes: int | None = None,
+    ) -> None:
+        with self.session_factory() as session:
+            row = self._row(session)
+            row.ollama_status = ollama_status[:32]
+            row.gpu_status = gpu_status[:64]
+            row.gpu_memory_bytes = gpu_memory_bytes
+            row.updated_at = utc_now()
             session.commit()
 
     def record_test_success(self, *, stage: str, model: str, at: datetime | None = None) -> None:
@@ -177,7 +197,9 @@ class AIDiagnosticsStore:
                     "provider": "unknown", "model": "unknown", "api_key_configured": False,
                     "worker_api_key_configured": False, "last_request_status": "never",
                     "last_error_code": None, "last_error_message": None, "last_successful_request": None,
-                    "average_latency_ms": 0.0, "ready_for_patient_processing": False,
+                    "average_latency_ms": 0.0, "page_latency_ms": None, "patient_latency_ms": None,
+                    "gpu_memory_bytes": None, "ollama_status": None, "gpu_status": None,
+                    "ready_for_patient_processing": False,
                 }
             result = {
                 "provider": row.provider,
@@ -189,6 +211,11 @@ class AIDiagnosticsStore:
                 "last_error_message": row.last_error_message,
                 "last_successful_request": iso(row.last_successful_request),
                 "average_latency_ms": round(float(row.average_latency_ms or 0.0), 1),
+                "page_latency_ms": round(float(row.last_page_latency_ms), 1) if row.last_page_latency_ms is not None else None,
+                "patient_latency_ms": round(float(row.last_patient_latency_ms), 1) if row.last_patient_latency_ms is not None else None,
+                "gpu_memory_bytes": row.gpu_memory_bytes,
+                "ollama_status": row.ollama_status,
+                "gpu_status": row.gpu_status,
                 "ready_for_patient_processing": bool(row.last_text_success_at and row.last_vision_success_at and row.last_text_success_model == row.model and row.last_vision_success_model == row.model),
             }
             if include_technical:

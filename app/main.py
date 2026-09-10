@@ -17,7 +17,7 @@ from app.schemas import JobStatus, ReportGenerationRequest, ReportRecord, Report
 from app.services.ingestion import ArchiveCorruptError, ArchivePasswordError, IngestionError, detect_archive_type
 from app.services.reports import ReportGenerator
 from app.services.providers import PatientLevelAIError
-from app.services.providers import OpenAIMedicalVisionProvider, OpenRouterMedicalVisionProvider
+from app.services.providers import LocalMedicalVisionProvider, OpenAIMedicalVisionProvider, OpenRouterMedicalVisionProvider
 from app.services.ai_diagnostics import AIDiagnosticsStore, safe_error_message
 
 app = FastAPI(title="Medical Records Digitization MVP", version="0.1.0")
@@ -25,8 +25,15 @@ repository = RecordRepository(make_session_factory())
 pipeline = PatientPipeline(repository, settings)
 report_generator = ReportGenerator(repository, settings)
 ai_diagnostic_store = AIDiagnosticsStore(repository.session_factory)
-_configured_model = settings.openrouter_model if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_medical_model
-_configured_key = settings.openrouter_api_key if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_api_key
+
+
+def _is_local_provider(provider: str) -> bool:
+    value = provider.casefold()
+    return value.startswith("local") or value in {"ollama", "ollama_local"}
+
+
+_configured_model = settings.local_ai_model if _is_local_provider(settings.ai_provider) else settings.openrouter_model if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_medical_model
+_configured_key = None if _is_local_provider(settings.ai_provider) else settings.openrouter_api_key if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_api_key
 ai_diagnostic_store.mark_runtime(role="api", provider=settings.ai_provider, model=_configured_model, api_key_configured=bool(_configured_key))
 
 
@@ -59,14 +66,33 @@ def _technical_details_enabled() -> bool:
 def get_ai_diagnostics() -> dict[str, object]:
     """Return redacted provider diagnostics; no request payloads or secrets."""
 
+    local_health: dict[str, object] | None = None
+    if _is_local_provider(settings.ai_provider) and isinstance(pipeline.provider, LocalMedicalVisionProvider):
+        # Refresh runtime metadata before taking the shared snapshot so the
+        # top-level diagnostics and the Local AI card describe the same probe.
+        local_health = pipeline.provider.health()
     snapshot = ai_diagnostic_store.snapshot(include_technical=_technical_details_enabled())
     snapshot.update({
         "configured_provider": settings.ai_provider,
-        "configured_model": settings.openrouter_model if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_medical_model,
-        "provider_options": ["openai", "openrouter"],
+        "configured_model": settings.local_ai_model if _is_local_provider(settings.ai_provider) else settings.openrouter_model if settings.ai_provider.casefold().startswith("openrouter") else settings.openai_medical_model,
+        "provider_options": ["openai", "openrouter", "local"],
         "provider_switching": "environment_configuration",
     })
+    if local_health is not None:
+        snapshot["local_ai"] = local_health
     return snapshot
+
+
+@app.get("/admin/ai/local-health")
+def get_local_ai_health() -> dict[str, object]:
+    """Probe only the configured local Ollama endpoint; never a cloud provider."""
+
+    if not _is_local_provider(settings.ai_provider):
+        raise HTTPException(status_code=409, detail="Local AI provider is not selected")
+    provider = _configured_current_provider()
+    if not isinstance(provider, LocalMedicalVisionProvider):
+        raise HTTPException(status_code=503, detail="Local AI provider is unavailable")
+    return provider.health()
 
 
 def _configured_openai_provider() -> OpenAIMedicalVisionProvider:
@@ -80,10 +106,15 @@ def _configured_openai_provider() -> OpenAIMedicalVisionProvider:
     return OpenAIMedicalVisionProvider(settings, diagnostics=ai_diagnostic_store)
 
 
-def _configured_current_provider() -> OpenAIMedicalVisionProvider | OpenRouterMedicalVisionProvider:
+def _configured_current_provider() -> OpenAIMedicalVisionProvider | OpenRouterMedicalVisionProvider | LocalMedicalVisionProvider:
     """Build the currently configured provider for the admin smoke tests."""
 
-    if settings.ai_provider.casefold().startswith("openrouter"):
+    provider_name = settings.ai_provider.casefold()
+    if provider_name.startswith("local") or provider_name in {"ollama", "ollama_local"}:
+        if isinstance(pipeline.provider, LocalMedicalVisionProvider):
+            return pipeline.provider
+        return LocalMedicalVisionProvider(settings, diagnostics=ai_diagnostic_store)
+    if provider_name.startswith("openrouter"):
         if not settings.openrouter_api_key:
             ai_diagnostic_store.mark_runtime(role="api", provider=settings.ai_provider, model=settings.openrouter_model, api_key_configured=False)
             raise HTTPException(status_code=503, detail="OpenRouter API key is not configured")

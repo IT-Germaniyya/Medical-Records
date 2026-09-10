@@ -50,6 +50,9 @@ class Settings:
     openrouter_api_key: str | None = os.getenv("OPENROUTER_API_KEY") or None
     openrouter_model: str = os.getenv("OPENROUTER_MODEL", "openrouter/free")
     openrouter_base_url: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    local_ai_base_url: str = os.getenv("LOCAL_AI_BASE_URL", "http://host.docker.internal:11434")
+    local_ai_model: str = os.getenv("LOCAL_AI_MODEL", "qwen3-vl")
+    local_ocr_enabled: bool = os.getenv("LOCAL_OCR_ENABLED", "false").casefold() in {"1", "true", "yes", "on"}
 
 
 settings = Settings()

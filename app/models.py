@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -238,4 +238,9 @@ class AIDiagnosticModel(Base):
     average_latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_page_latency_ms: Mapped[float | None] = mapped_column(Float)
+    last_patient_latency_ms: Mapped[float | None] = mapped_column(Float)
+    gpu_memory_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    ollama_status: Mapped[str | None] = mapped_column(String(32))
+    gpu_status: Mapped[str | None] = mapped_column(String(64))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
