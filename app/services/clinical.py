@@ -15,7 +15,15 @@ def build_timeline_and_problems(record: StructuredRecord) -> None:
     for event_date, labs in by_date.items():
         summary = "; ".join(lab.value_text or f"{lab.test_name_original}: {lab.value}" for lab in labs)
         events.append(TimelineEvent(date=event_date, event="Laboratory results", summary=summary, source_refs=[lab.source_ref for lab in labs]))
-    record.timeline = sorted(events, key=lambda event: event.date or "9999-12-31")
+    if record.ai_clinical_review and record.timeline:
+        # Patient-level AI already reviewed all encounters and preserves the
+        # longitudinal chronology.  Add any typed lab events only when they
+        # are not already represented in that canonical timeline.
+        existing_keys = {(item.date, item.event, item.summary) for item in record.timeline}
+        record.timeline.extend(event for event in events if (event.date, event.event, event.summary) not in existing_keys)
+        record.timeline = sorted(record.timeline, key=lambda event: event.date or "9999-12-31")
+    else:
+        record.timeline = sorted(events, key=lambda event: event.date or "9999-12-31")
 
     existing = {(item.problem.lower(), item.source_type) for item in record.problem_list}
     for diagnosis in record.diagnoses:

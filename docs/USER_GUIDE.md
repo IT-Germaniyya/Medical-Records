@@ -20,9 +20,9 @@ Open [http://localhost:8080](http://localhost:8080) in the hospital workstation 
 
 To add documents to an existing patient, open that patient and select **Add documents**. Earlier source files and extracted facts are retained. Duplicate files are skipped by checksum. Unsupported files inside an archive are skipped with a warning; nested archives are skipped for safety.
 
-## Optional multimodal extraction
+## Patient-level AI review
 
-The default `AI_EXTRACTION_PROVIDER=local_safe` mode never sends records over the network. After a privacy/security review and approval to use an external processor, set `AI_EXTRACTION_PROVIDER=openai` for the backend and worker only. Provide `OPENAI_API_KEY`, `OPENAI_MEDICAL_MODEL`, and `OPENAI_REASONING_MODEL` through an untracked `.env` or a deployment secret manager. The key is never exposed to frontend JavaScript. The provider uses the Responses API with strict structured JSON, routes complex/handwritten pages to the medical model, retries transient failures, and sends uncertain fields to Review Items. Use `python -m app.tools.test_openai_extraction path/to/deidentified-page.jpg` only for an explicitly approved, de-identified smoke test.
+The default `AI_EXTRACTION_MODE=patient_level` sends the complete patient bundle to the configured multimodal model as one clinical case when `AI_EXTRACTION_PROVIDER=openai`. The model reads all pages/images together, preserves source references, reconstructs the longitudinal history, and produces the canonical review used by both reports. Configure `OPENAI_API_KEY`, `OPENAI_MEDICAL_MODEL`, `OPENAI_SUMMARY_MODEL`, and `OPENAI_IMAGE_DETAIL=high` through an untracked `.env` or a deployment secret manager. The key is never exposed to frontend JavaScript. Large records use a hierarchical multimodal fallback; if AI review cannot be completed, the patient is marked failed and the original files remain preserved.
 
 ## Search for a patient
 
@@ -34,7 +34,10 @@ The workspace tabs are:
 - **Documents**: original PDFs/images, document filters, page navigation, image zoom/rotation, and page-level extracted data.
 - **Timeline**, **Problems**, **Labs**, **Medications**, and **Growth / Vitals**: structured clinical views.
 - **Review Items**: only uncertain or high-risk fields requiring a human decision.
+- **AI Clinical Review**: the holistic clinical summary, documented diagnoses, active problems, key investigations, medication history, pediatric/growth assessment, and uncertain/illegible items before report generation.
 - **Reports**: generate and retrieve both report types.
+
+Use **Reprocess with AI** to invalidate the current reconstruction and create a new review version without deleting earlier report versions.
 
 ## Review uncertain data
 

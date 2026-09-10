@@ -61,7 +61,7 @@ class RecordRepository:
             patient = session.get(PatientModel, patient_id)
             if patient is not None:
                 patient.processing_status = "failed"
-                patient.review_status = "pending"
+                patient.review_status = "needs_retry"
                 session.commit()
 
     def save(self, record: StructuredRecord, pages: Iterable[dict[str, object]]) -> None:
@@ -119,6 +119,7 @@ class RecordRepository:
                     archive_filename=source.archive_filename, archive_type=source.archive_type,
                     original_relative_path=source.original_relative_path,
                     extracted_filename=source.extracted_filename,
+                    source_order=source.source_order,
                 ))
             for page in pages:
                 session.add(SourcePageModel(
@@ -242,7 +243,7 @@ class RecordRepository:
     def source_pages(self, patient_id: str) -> list[dict]:
         with self.session_factory() as session:
             rows = session.execute(
-                select(SourcePageModel).join(SourceFileModel, SourcePageModel.file_id == SourceFileModel.file_id).where(SourceFileModel.patient_id == patient_id).order_by(SourceFileModel.original_filename, SourcePageModel.page_number)
+                select(SourcePageModel).join(SourceFileModel, SourcePageModel.file_id == SourceFileModel.file_id).where(SourceFileModel.patient_id == patient_id).order_by(SourceFileModel.source_order, SourceFileModel.original_filename, SourcePageModel.page_number)
             ).scalars()
             return [{"page_id": row.page_id, "file_id": row.file_id, "page_number": row.page_number, "document_type": row.document_type, "classification_confidence": row.classification_confidence, "extraction_status": row.extraction_status} for row in rows]
 
@@ -306,7 +307,7 @@ class RecordRepository:
 
     def create_report(self, report: ReportRecord, source_links: list[tuple[str, int | None]]) -> ReportRecord:
         with self.session_factory() as session:
-            session.add(ReportModel(report_id=report.report_id, patient_id=report.patient_id, report_type=report.report_type.value, version=report.version, file_path=report.file_path, text_path=report.text_path, json_path=report.json_path, status=report.status, created_at=report.created_at, created_by=report.created_by, model_name=report.model_name, prompt_version=report.prompt_version, source_record_hash=report.source_record_hash, review_status=report.review_status))
+            session.add(ReportModel(report_id=report.report_id, patient_id=report.patient_id, report_type=report.report_type.value, version=report.version, file_path=report.file_path, text_path=report.text_path, json_path=report.json_path, status=report.status, created_at=report.created_at, created_by=report.created_by, model_name=report.model_name, prompt_version=report.prompt_version, source_record_hash=report.source_record_hash, review_status=report.review_status, ai_review_version=report.ai_review_version))
             for file_id, page_number in source_links:
                 session.add(ReportSourceLinkModel(link_id=str(uuid4()), report_id=report.report_id, file_id=file_id, page_number=page_number))
             session.commit()
@@ -365,7 +366,7 @@ class RecordRepository:
     def _report_schema(session: Session, row: ReportModel) -> ReportRecord:
         links = session.scalars(select(ReportSourceLinkModel).where(ReportSourceLinkModel.report_id == row.report_id)).all()
         patient = session.get(PatientModel, row.patient_id)
-        return ReportRecord(report_id=row.report_id, patient_id=row.patient_id, patient_name=patient.full_name if patient else None, hospital_file_number=patient.hospital_file_number if patient else None, report_type=ReportType(row.report_type), version=row.version, file_path=row.file_path, text_path=row.text_path, json_path=row.json_path, status=row.status, created_at=row.created_at, created_by=row.created_by, model_name=row.model_name, prompt_version=row.prompt_version, source_record_hash=row.source_record_hash, review_status=row.review_status, source_file_ids=[link.file_id for link in links])
+        return ReportRecord(report_id=row.report_id, patient_id=row.patient_id, patient_name=patient.full_name if patient else None, hospital_file_number=patient.hospital_file_number if patient else None, report_type=ReportType(row.report_type), version=row.version, file_path=row.file_path, text_path=row.text_path, json_path=row.json_path, status=row.status, created_at=row.created_at, created_by=row.created_by, model_name=row.model_name, prompt_version=row.prompt_version, source_record_hash=row.source_record_hash, review_status=row.review_status, source_file_ids=[link.file_id for link in links], ai_review_version=row.ai_review_version)
 
     @staticmethod
     def _preferred_value(value):

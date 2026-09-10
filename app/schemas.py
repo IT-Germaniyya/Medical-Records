@@ -194,6 +194,9 @@ class SourceFile(BaseModel):
     archive_type: str | None = None
     original_relative_path: str | None = None
     extracted_filename: str | None = None
+    # Stable order for holistic review: archive/page order when available,
+    # followed by the original relative path.
+    source_order: int | None = None
 
 
 class SourcePageInfo(BaseModel):
@@ -239,6 +242,16 @@ class StructuredRecord(BaseModel):
     # Optional, reviewable output from the patient-level reasoning stage. The
     # canonical facts above remain the source of truth for reports.
     clinical_synthesis: dict[str, Any] | None = None
+    # Canonical patient-level multimodal reconstruction.  The narrow typed
+    # collections above remain available for exports and backward-compatible
+    # integrations; this object is the authoritative AI review for reports.
+    ai_clinical_review: dict[str, Any] | None = None
+    ai_review_version: str | None = None
+    ai_review_model: str | None = None
+    ai_review_prompt_version: str | None = None
+    ai_review_source_hash: str | None = None
+    ai_review_created_at: datetime | None = None
+    ai_review_history: list[dict[str, Any]] = Field(default_factory=list)
     processing_warnings: list[str] = Field(default_factory=list)
     patient_status: str = "completed"
 
@@ -273,6 +286,7 @@ class ReportRecord(BaseModel):
     source_record_hash: str
     review_status: str
     source_file_ids: list[str] = Field(default_factory=list)
+    ai_review_version: str | None = None
 
 
 class ReportGenerationRequest(BaseModel):

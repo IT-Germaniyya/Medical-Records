@@ -9,6 +9,7 @@ import time
 from shutil import copy2
 from uuid import uuid4
 import zipfile
+import re
 
 from pypdf import PdfReader
 
@@ -346,7 +347,15 @@ def patient_files(patient_folder: Path) -> list[Path]:
     files = [path for path in patient_folder.rglob("*") if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES]
     if not files:
         raise IngestionError("patient folder contains no JPG, PNG, or PDF source files")
-    return sorted(files)
+    # Natural path ordering keeps page_2 ahead of page_10 while retaining the
+    # archive's relative-path order for files without an explicit sequence.
+    def order_key(path: Path) -> tuple:
+        parts = []
+        for token in re.split(r"(\d+)", path.relative_to(patient_folder).as_posix().casefold()):
+            parts.append((0, int(token)) if token.isdigit() else (1, token))
+        return tuple(parts)
+
+    return sorted(files, key=order_key)
 
 
 def page_count(path: Path) -> tuple[int | None, list[str]]:
@@ -371,7 +380,7 @@ def ingest_folder(
     original_dir.mkdir(parents=True, exist_ok=True)
     ingested: list[IngestedFile] = []
     seen: set[str] = set()
-    for input_path in patient_files(patient_folder):
+    for source_order, input_path in enumerate(patient_files(patient_folder)):
         checksum = checksum_file(input_path)
         if checksum in seen or (skip_checksums and checksum in skip_checksums):
             continue
@@ -394,6 +403,7 @@ def ingest_folder(
                 archive_type=archive_type,
                 original_relative_path=relative_name if archive_filename else None,
                 extracted_filename=relative_name if archive_filename else None,
+                source_order=source_order,
             ),
             input_path=input_path,
             warnings=warnings,

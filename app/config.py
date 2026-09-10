@@ -22,11 +22,19 @@ class Settings:
     # AI is opt-in.  The default remains the no-network local provider so an
     # installation cannot accidentally send PHI to an external service.
     ai_provider: str = os.getenv("AI_EXTRACTION_PROVIDER", os.getenv("AI_PROVIDER", "local_safe"))
+    # Patient-level review is the primary multimodal workflow.  The value is
+    # deliberately configurable so a deployment can stage the migration, but
+    # the default is the holistic patient review requested by the product.
+    ai_extraction_mode: str = os.getenv("AI_EXTRACTION_MODE", "patient_level")
     legacy_ocr_enabled: bool = os.getenv("LEGACY_OCR_ENABLED", "false").casefold() in {"1", "true", "yes", "on"}
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
     openai_medical_model: str = os.getenv("OPENAI_MEDICAL_MODEL", "gpt-5.6-sol")
     openai_fast_model: str = os.getenv("OPENAI_FAST_MODEL", os.getenv("OPENAI_MEDICAL_MODEL", "gpt-5.6-sol"))
     openai_reasoning_model: str = os.getenv("OPENAI_REASONING_MODEL", "gpt-5.6-sol")
+    openai_summary_model: str = os.getenv("OPENAI_SUMMARY_MODEL", os.getenv("OPENAI_REASONING_MODEL", "gpt-5.6-sol"))
+    openai_image_detail: str = os.getenv("OPENAI_IMAGE_DETAIL", "high")
+    ai_allow_hierarchical_fallback: bool = os.getenv("AI_ALLOW_HIERARCHICAL_FALLBACK", "true").casefold() in {"1", "true", "yes", "on"}
+    ai_max_patient_bytes: int = int(os.getenv("AI_MAX_PATIENT_BYTES", str(40 * 1024 * 1024)))
     fast_model_min_confidence: float = float(os.getenv("FAST_MODEL_MIN_CONFIDENCE", "0.80"))
     auto_accept_confidence: float = float(os.getenv("AUTO_ACCEPT_CONFIDENCE", "0.95"))
     physician_review_confidence: float = float(os.getenv("PHYSICIAN_REVIEW_CONFIDENCE", "0.70"))

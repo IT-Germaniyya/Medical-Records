@@ -122,3 +122,51 @@ class ClinicalSynthesis(BaseModel):
     physician_summary: str = ""
     erp_summary: str = ""
     overall_confidence: float = Confidence
+
+
+class PatientLevelReview(BaseModel):
+    """Strict, source-grounded reconstruction for one complete patient chart.
+
+    The nested clinical collections intentionally remain extensible: medical
+    documents contain heterogeneous facts (ECGs, charts, discharge notes,
+    vaccination records, and handwritten annotations).  The top-level contract
+    is fixed so the UI and report generators can safely rely on one canonical
+    review object.
+    """
+
+    patient: dict[str, Any] = Field(default_factory=dict)
+    record_quality: dict[str, Any] = Field(default_factory=dict)
+    birth_history: dict[str, Any] = Field(default_factory=dict)
+    past_medical_history: list[dict[str, Any]] = Field(default_factory=list)
+    active_problems: list[dict[str, Any]] = Field(default_factory=list)
+    resolved_or_historical_problems: list[dict[str, Any]] = Field(default_factory=list)
+    encounters: list[dict[str, Any]] = Field(default_factory=list)
+    symptoms: list[dict[str, Any]] = Field(default_factory=list)
+    clinical_findings: list[dict[str, Any]] = Field(default_factory=list)
+    diagnoses_documented: list[dict[str, Any]] = Field(default_factory=list)
+    clinical_interpretations: list[dict[str, Any]] = Field(default_factory=list)
+    medications: list[dict[str, Any]] = Field(default_factory=list)
+    allergies: list[dict[str, Any]] = Field(default_factory=list)
+    laboratory_results: list[dict[str, Any]] = Field(default_factory=list)
+    radiology: list[dict[str, Any]] = Field(default_factory=list)
+    procedures: list[dict[str, Any]] = Field(default_factory=list)
+    vaccinations: list[dict[str, Any]] = Field(default_factory=list)
+    growth_measurements: list[dict[str, Any]] = Field(default_factory=list)
+    growth_interpretation: str = ""
+    clinical_timeline: list[dict[str, Any]] = Field(default_factory=list)
+    uncertain_items: list[dict[str, Any]] = Field(default_factory=list)
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    detailed_report_markdown: str = ""
+    erp_summary_markdown: str = ""
+
+
+class PatientBundleItem(BaseModel):
+    """Manifest entry passed to the multimodal patient-level provider."""
+
+    source_id: str
+    source_file: str
+    relative_path: str
+    page_number: int = Field(default=1, ge=1)
+    order_index: int = Field(default=0, ge=0)
+    media_type: str
+    local_path: str

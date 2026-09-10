@@ -29,10 +29,12 @@ def write_outputs(record: StructuredRecord, output_root: Path) -> Path:
     (target / "problem_list.json").write_text(json.dumps(payload["problem_list"], indent=2), encoding="utf-8")
     (target / "verification_queue.json").write_text(json.dumps(payload["verification_queue"], indent=2), encoding="utf-8")
     (target / "audit.json").write_text(json.dumps(payload["audit_events"], indent=2), encoding="utf-8")
-    summary = physician_summary(record)
+    summary = (record.ai_clinical_review or {}).get("erp_summary_markdown") or physician_summary(record)
     (target / "physician_summary.txt").write_text(summary, encoding="utf-8")
     (target / "physician_summary.html").write_text(f"<!doctype html><html><body><pre>{html.escape(summary)}</pre></body></html>", encoding="utf-8")
     (target / "patient.json").write_text(json.dumps(payload["patient"], indent=2), encoding="utf-8")
+    if record.ai_clinical_review:
+        (target / "ai_clinical_review.json").write_text(json.dumps(record.ai_clinical_review, indent=2), encoding="utf-8")
     (target / "fhir_bundle.json").write_text(json.dumps(fhir_bundle(record), indent=2), encoding="utf-8")
     _write_csv(target / "patients.csv", [{"patient_id": record.patient.patient_id}])
     _write_csv(target / "encounters.csv", [item.model_dump(mode="json") for item in record.encounters])

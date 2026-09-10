@@ -26,6 +26,19 @@ PROMPT_VERSION = "physician_report_v1"
 MODEL_NAME = "structured_record_renderer"
 
 
+def _markdown_lines(value: str) -> list[str]:
+    """Convert model markdown to safe report paragraphs without executing HTML."""
+    lines: list[str] = []
+    for raw in (value or "").splitlines():
+        text = raw.strip()
+        if not text:
+            continue
+        text = re.sub(r"^#{1,6}\s*", "", text)
+        text = re.sub(r"^[-*]\s+", "• ", text)
+        lines.append(text)
+    return lines
+
+
 def _safe_component(value: str | None) -> str:
     clean = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "unknown")).strip("._")
     return clean[:80] or "unknown"
@@ -59,10 +72,12 @@ def erp_summary_payload(record: StructuredRecord) -> dict:
         "relevant_history": [{"date": item.date, "event": item.event, "summary": item.summary} for item in record.timeline],
         "key_labs": [item.model_dump(mode="json") for item in record.laboratory_results],
         "medications": [item.model_dump(mode="json") for item in record.medications],
-        "allergies": None,
+        "allergies": (record.ai_clinical_review or {}).get("allergies", []) if record.ai_clinical_review else None,
         "growth": [item.model_dump(mode="json") for item in record.growth_measurements],
         "follow_up": [item.model_dump(mode="json") for item in record.verification_queue],
         "verification_items": [item.model_dump(mode="json") for item in record.verification_queue],
+        "ai_review_version": record.ai_review_version,
+        "ai_clinical_review": record.ai_clinical_review,
     }
 
 
@@ -117,14 +132,14 @@ class ReportGenerator:
             json_path.write_text(json.dumps(erp_summary_payload(record), indent=2), encoding="utf-8")
         source_hash = sha256(json.dumps(record.model_dump(mode="json"), sort_keys=True).encode("utf-8")).hexdigest()
         status = "needs_review" if grounding_errors or any(item.review_status.value == "pending" for item in record.verification_queue) else "ready"
-        report = ReportRecord(report_id=str(uuid4()), patient_id=patient_id, patient_name=_value(record.patient.full_name) if record.patient.full_name else None, hospital_file_number=_value(record.patient.hospital_file_number) if record.patient.hospital_file_number else None, report_type=report_type, version=version, file_path=str(pdf_path), text_path=str(text_path), json_path=str(json_path) if json_path else None, status=status, created_at=created_at, created_by=created_by, model_name=MODEL_NAME, prompt_version=PROMPT_VERSION, source_record_hash=source_hash, review_status="pending" if status == "needs_review" else "not_required", source_file_ids=[item.file_id for item in record.source_files])
+        report = ReportRecord(report_id=str(uuid4()), patient_id=patient_id, patient_name=_value(record.patient.full_name) if record.patient.full_name else None, hospital_file_number=_value(record.patient.hospital_file_number) if record.patient.hospital_file_number else None, report_type=report_type, version=version, file_path=str(pdf_path), text_path=str(text_path), json_path=str(json_path) if json_path else None, status=status, created_at=created_at, created_by=created_by, model_name=record.ai_review_model or MODEL_NAME, prompt_version=record.ai_review_prompt_version or PROMPT_VERSION, source_record_hash=record.ai_review_source_hash or source_hash, review_status="pending" if status == "needs_review" else "not_required", source_file_ids=[item.file_id for item in record.source_files], ai_review_version=record.ai_review_version)
         source_links = [(page.file_id, page.page_number) for page in record.source_pages]
         if not source_links:
             source_links = [(item.file_id, None) for item in record.source_files]
         return self.repository.create_report(report, source_links)
 
     def _context(self, record: StructuredRecord, version: int, created_at: datetime) -> dict:
-        return {"patient": record.patient, "source_files": record.source_files, "timeline": record.timeline, "problem_list": record.problem_list, "diagnoses": record.diagnoses, "labs": record.laboratory_results, "medications": record.medications, "growth": record.growth_measurements, "radiology": record.radiology_reports, "verification": record.verification_queue, "clinical_summary": _clinical_summary(record), "version": version, "created_at": created_at.strftime("%Y-%m-%d %H:%M UTC"), "value": _value}
+        return {"patient": record.patient, "source_files": record.source_files, "timeline": record.timeline, "problem_list": record.problem_list, "diagnoses": record.diagnoses, "labs": record.laboratory_results, "medications": record.medications, "growth": record.growth_measurements, "radiology": record.radiology_reports, "verification": record.verification_queue, "clinical_summary": _clinical_summary(record), "ai_review": record.ai_clinical_review or {}, "version": version, "created_at": created_at.strftime("%Y-%m-%d %H:%M UTC"), "value": _value}
 
     def _render_pdf(self, record: StructuredRecord, report_type: ReportType, context: dict, destination: Path) -> str:
         styles = getSampleStyleSheet()
@@ -132,13 +147,39 @@ class ReportGenerator:
         styles.add(ParagraphStyle(name="Section", parent=styles["Heading2"], textColor=colors.HexColor("#176B80"), spaceBefore=10, spaceAfter=4))
         body = styles["BodyText"]
         story = [Paragraph("Detailed Medical Report" if report_type == ReportType.DETAILED else "ERP Physician Summary", styles["ReportTitle"]), Paragraph(f"Patient ID: {escape(record.patient.patient_id)} &nbsp; | &nbsp; Version {context['version']}", body), Spacer(1, 6)]
-        sections = [("Patient Identification", f"Name: {escape(_value(record.patient.full_name))}<br/>Hospital file number: {escape(_value(record.patient.hospital_file_number))}<br/>Sex: {escape(_value(record.patient.sex))}<br/>Date of birth: {escape(_value(record.patient.date_of_birth))}"), ("Clinical Summary", escape(context["clinical_summary"])), ("Active Problems", "; ".join(escape(item.problem) for item in record.problem_list) or "No documented active problems extracted."), ("Key Investigations", "; ".join(escape(item.value_text or str(item.value)) for item in record.laboratory_results) or "No structured laboratory values extracted."), ("Medication History", "; ".join(escape(item.name_original or "Unidentified medication") for item in record.medications) or "No structured medications extracted."), ("Growth / Relevant Vitals", "; ".join(f"{item.date or 'Date not documented'}: {item.weight_kg or '-'} kg, {item.height_cm or '-'} cm" for item in record.growth_measurements) or "No structured growth measurements extracted."), ("Allergy Status", "No allergy status was extracted; this is not evidence of no allergy."), ("Follow-up / Verification Needs", f"{len(record.verification_queue)} item(s) require human review before clinical or ERP use." if record.verification_queue else "No pending verification items.")]
+        ai_review = record.ai_clinical_review or {}
+        ai_markdown = ai_review.get("detailed_report_markdown" if report_type == ReportType.DETAILED else "erp_summary_markdown", "") if isinstance(ai_review, dict) else ""
+        sections = [("Patient Identification", f"Name: {escape(_value(record.patient.full_name))}<br/>Hospital file number: {escape(_value(record.patient.hospital_file_number))}<br/>Sex: {escape(_value(record.patient.sex))}<br/>Date of birth: {escape(_value(record.patient.date_of_birth))}")]
+        if ai_markdown:
+            sections.append(("AI Clinical Review" if report_type == ReportType.DETAILED else "Clinical Summary", "<br/>".join(escape(line) for line in _markdown_lines(ai_markdown))))
+        else:
+            sections.extend([("Clinical Summary", escape(context["clinical_summary"])), ("Active Problems", "; ".join(escape(item.problem) for item in record.problem_list) or "No documented active problems extracted."), ("Key Investigations", "; ".join(escape(item.value_text or str(item.value)) for item in record.laboratory_results) or "No structured laboratory values extracted."), ("Medication History", "; ".join(escape(item.name_original or "Unidentified medication") for item in record.medications) or "No structured medications extracted."), ("Growth / Relevant Vitals", "; ".join(f"{item.date or 'Date not documented'}: {item.weight_kg or '-'} kg, {item.height_cm or '-'} cm" for item in record.growth_measurements) or "No structured growth measurements extracted."), ("Allergy Status", "No allergy status was extracted; this is not evidence of no allergy."), ("Follow-up / Verification Needs", f"{len(record.verification_queue)} item(s) require human review before clinical or ERP use." if record.verification_queue else "No pending verification items.")])
         if report_type == ReportType.DETAILED:
+            figures = [source for source in record.source_files if any(token in source.original_filename.casefold() for token in ("growth", "ecg", "chart", "histogram")) and source.file_type.casefold() in {"jpg", "jpeg", "png"}]
+            if figures:
+                sections.append(("Clinically Important Figures", "<br/>".join(escape(source.original_filename) for source in figures)))
             sections.insert(2, ("Clinical Timeline", "<br/>".join(f"{escape(item.date or 'Date not documented')} — {escape(item.event)}: {escape(item.summary)}" for item in record.timeline) or "No dated clinical timeline events were extracted."))
             sections.insert(3, ("Diagnoses", "<br/>".join(f"{escape(item.term_original)} ({escape(item.type)}, {escape(item.certainty)})" for item in record.diagnoses) or "No structured diagnoses extracted."))
         for heading, content in sections:
             story.extend([Paragraph(heading, styles["Section"]), Paragraph(content, body)])
         if report_type == ReportType.DETAILED:
+            if figures:
+                story.append(PageBreak())
+                story.append(Paragraph("Clinically Important Figures", styles["Section"]))
+                story.append(Paragraph("Figures are reproduced at readable resolution and retain their original source filenames.", body))
+                for source in figures:
+                    if not Path(source.original_path).is_file():
+                        continue
+                    story.append(Paragraph(escape(source.original_filename), body))
+                    try:
+                        from PIL import Image as PILImage
+                        with PILImage.open(source.original_path) as image:
+                            width, height = image.size
+                        max_w, max_h = 170 * mm, 230 * mm
+                        scale = min(max_w / width, max_h / height)
+                        story.append(Image(source.original_path, width=width * scale, height=height * scale))
+                    except Exception:
+                        story.append(Paragraph("Figure could not be embedded; inspect the original source file.", body))
             story.append(PageBreak())
             story.append(Paragraph("Appendix: Original Source Documents", styles["Section"]))
             story.append(Paragraph("Original source pages are appended without cropping clinically meaningful content.", body))
@@ -193,5 +234,10 @@ class ReportGenerator:
 
     @staticmethod
     def _plain_text(record: StructuredRecord, report_type: ReportType) -> str:
-        lines = ["ERP Physician Summary" if report_type == ReportType.ERP_SUMMARY else "Detailed Medical Report", f"Patient ID: {record.patient.patient_id}", "", "Clinical Summary", _clinical_summary(record), "", "Key Investigations", "; ".join(item.value_text or str(item.value) for item in record.laboratory_results) or "No structured laboratory values extracted.", "", "Medication History", "; ".join(item.name_original or "Unidentified medication" for item in record.medications) or "No structured medications extracted.", "", "Active Problems", "; ".join(item.problem for item in record.problem_list) or "No documented active problems extracted.", "", "Follow-up / Verification Needs", f"{len(record.verification_queue)} item(s) require human review before clinical or ERP use." if record.verification_queue else "No pending verification items."]
+        ai_review = record.ai_clinical_review or {}
+        markdown = ai_review.get("detailed_report_markdown" if report_type == ReportType.DETAILED else "erp_summary_markdown", "") if isinstance(ai_review, dict) else ""
+        if markdown:
+            lines = ["ERP Physician Summary" if report_type == ReportType.ERP_SUMMARY else "Detailed Medical Report", f"Patient ID: {record.patient.patient_id}", "", *_markdown_lines(markdown)]
+        else:
+            lines = ["ERP Physician Summary" if report_type == ReportType.ERP_SUMMARY else "Detailed Medical Report", f"Patient ID: {record.patient.patient_id}", "", "Clinical Summary", _clinical_summary(record), "", "Key Investigations", "; ".join(item.value_text or str(item.value) for item in record.laboratory_results) or "No structured laboratory values extracted.", "", "Medication History", "; ".join(item.name_original or "Unidentified medication" for item in record.medications) or "No structured medications extracted.", "", "Active Problems", "; ".join(item.problem for item in record.problem_list) or "No documented active problems extracted.", "", "Follow-up / Verification Needs", f"{len(record.verification_queue)} item(s) require human review before clinical or ERP use." if record.verification_queue else "No pending verification items."]
         return "\n".join(lines)

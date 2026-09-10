@@ -42,6 +42,7 @@ class SourceFileModel(Base):
     archive_type: Mapped[str | None] = mapped_column(String(16))
     original_relative_path: Mapped[str | None] = mapped_column(String(1024))
     extracted_filename: Mapped[str | None] = mapped_column(String(1024))
+    source_order: Mapped[int | None] = mapped_column(Integer)
 
 
 class SourcePageModel(Base):
@@ -188,6 +189,7 @@ class ReportModel(Base):
     prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
     source_record_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     review_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    ai_review_version: Mapped[str | None] = mapped_column(String(64))
 
 
 class ReportSourceLinkModel(Base):

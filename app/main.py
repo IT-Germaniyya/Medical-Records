@@ -16,6 +16,7 @@ from app.repository import DuplicateSourceError, RecordRepository
 from app.schemas import JobStatus, ReportGenerationRequest, ReportRecord, ReportType, ReviewStatus, StructuredRecord
 from app.services.ingestion import ArchiveCorruptError, ArchivePasswordError, IngestionError, detect_archive_type
 from app.services.reports import ReportGenerator
+from app.services.providers import PatientLevelAIError
 
 app = FastAPI(title="Medical Records Digitization MVP", version="0.1.0")
 repository = RecordRepository(make_session_factory())
@@ -44,6 +45,8 @@ def health() -> dict[str, str]:
 def ingest(request: IngestRequest) -> StructuredRecord:
     try:
         return pipeline.process(Path(request.patient_folder), request.patient_id, request.resume).record
+    except PatientLevelAIError as exc:
+        raise HTTPException(status_code=503, detail="AI medical review could not be completed.") from exc
     except (ValueError, DuplicateSourceError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -100,15 +103,20 @@ def review_item(patient_id: str, item_id: str, request: ReviewRequest) -> Struct
 
 def _run_upload_job(job_id: str, source: Path, patient_id: str, metadata: dict[str, str | None]) -> None:
     is_archive = source.suffix.lower() in {".zip", ".rar"}
-    repository.update_job(job_id, status="processing", progress=15, message="Reading archive..." if is_archive else "Classifying documents")
+    repository.update_job(job_id, status="processing", progress=15, message="Preparing medical record..." if is_archive else "Preparing medical record...")
+    if settings.ai_extraction_mode.casefold() == "patient_level" and settings.ai_provider.casefold() in {"openai", "openai_vision", "openai_medical"}:
+        repository.update_job(job_id, status="processing", progress=25, message="AI is reviewing the complete patient record...")
     try:
         result = pipeline.process(source, patient_id=patient_id, resume=False, demographics=metadata)
         if is_archive and result.warnings:
             repository.update_job(job_id, status="complete", progress=100, message="Archive processed with warnings")
         elif is_archive:
-            repository.update_job(job_id, status="complete", progress=100, message="Archive extracted successfully; structured record ready for review")
+            repository.update_job(job_id, status="complete", progress=100, message="Clinical extraction complete")
         else:
-            repository.update_job(job_id, status="complete", progress=100, message="Structured record ready for review")
+            repository.update_job(job_id, status="complete", progress=100, message="Clinical extraction complete")
+    except PatientLevelAIError:
+        repository.mark_patient_failed(patient_id)
+        repository.update_job(job_id, status="failed", progress=100, message="AI medical review could not be completed.", error="AI medical review could not be completed")
     except ArchivePasswordError:
         repository.mark_patient_failed(patient_id)
         repository.update_job(job_id, status="failed", progress=100, message="This archive is password protected. Please upload an unencrypted archive.", error="Password-protected archive")
@@ -126,6 +134,29 @@ def _run_upload_job(job_id: str, source: Path, patient_id: str, metadata: dict[s
         staging_root = source.parent if source.is_file() else source
         if "incoming" in staging_root.parts and staging_root.name:
             shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def _run_ai_reprocess_job(job_id: str, patient_id: str) -> None:
+    repository.update_job(job_id, status="processing", progress=20, message="AI is reviewing the complete patient record...")
+    try:
+        source = settings.storage_root / patient_id / "original"
+        result = pipeline.process(source, patient_id=patient_id, resume=False)
+        repository.update_job(job_id, status="complete", progress=100, message="Clinical extraction complete")
+    except PatientLevelAIError:
+        repository.mark_patient_failed(patient_id)
+        repository.update_job(job_id, status="failed", progress=100, message="AI medical review could not be completed.", error="AI medical review could not be completed")
+    except Exception as exc:
+        repository.update_job(job_id, status="failed", progress=100, message="AI medical review could not be completed.", error=type(exc).__name__)
+
+
+@app.post("/patients/{patient_id}/ai-review/reprocess", response_model=JobStatus)
+def reprocess_ai_review(patient_id: str, background_tasks: BackgroundTasks) -> JobStatus:
+    if not repository.get_record(patient_id):
+        raise HTTPException(status_code=404, detail="patient record not found")
+    job = JobStatus(job_id=str(uuid4()), patient_id=patient_id, status="queued", progress=5, message="Preparing medical record...", created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+    repository.create_job(job, report_type="ai_review_reprocess")
+    background_tasks.add_task(_run_ai_reprocess_job, job.job_id, patient_id)
+    return job
 
 
 @app.post("/uploads", response_model=JobStatus)

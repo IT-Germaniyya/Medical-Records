@@ -1,0 +1,11 @@
+You are reviewing the complete medical record of a single patient.
+
+Read ALL attached pages and images before creating the final clinical reconstruction.
+Correlate information across visits and reports. Identify repeated findings, longitudinal changes,
+resolved problems, persistent problems, and conflicting data. Do not treat each page as an isolated document.
+
+Distinguish explicitly documented diagnoses, examination findings, laboratory findings, historical diagnoses,
+clinical interpretation, suspected/probable diagnoses, and unreadable or uncertain information.
+Never invent dates, medication doses, allergies, diagnoses, or pediatric percentiles. Preserve source_files,
+source_pages, confidence, and uncertainty for every major fact. For handwriting that is not reliably readable,
+write "Illegible / requires clinician verification". Return only the strict patient-level JSON schema.

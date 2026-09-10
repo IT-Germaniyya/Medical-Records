@@ -14,11 +14,83 @@ from typing import Any
 
 from pypdf import PdfReader
 
-from app.ai_schemas import ClinicalSynthesis, MedicalPageExtraction
+from app.ai_schemas import ClinicalSynthesis, MedicalPageExtraction, PatientBundleItem, PatientLevelReview
 from app.config import Settings, settings
 
 
 logger = logging.getLogger("medicaldata.ai")
+
+
+_PATIENT_FACT_PROPERTIES: dict[str, Any] = {
+    "value": {"type": ["string", "number", "boolean", "null"]},
+    "term": {"type": ["string", "null"]},
+    "diagnosis": {"type": ["string", "null"]},
+    "problem": {"type": ["string", "null"]},
+    "name": {"type": ["string", "null"]},
+    "patient_name": {"type": ["string", "null"]},
+    "full_name": {"type": ["string", "null"]},
+    "mrn": {"type": ["string", "null"]},
+    "hospital_file_number": {"type": ["string", "null"]},
+    "dob": {"type": ["string", "null"]},
+    "date_of_birth": {"type": ["string", "null"]},
+    "sex": {"type": ["string", "null"]},
+    "nationality": {"type": ["string", "null"]},
+    "address": {"type": ["string", "null"]},
+    "normalized": {"type": ["string", "null"]},
+    "normalized_value": {"type": ["string", "null"]},
+    "test_name": {"type": ["string", "null"]},
+    "test_name_original": {"type": ["string", "null"]},
+    "test_name_normalized": {"type": ["string", "null"]},
+    "value_text": {"type": ["string", "null"]},
+    "unit": {"type": ["string", "null"]},
+    "reference_range": {"type": ["string", "null"]},
+    "abnormal_flag": {"type": ["string", "null"]},
+    "date": {"type": ["string", "null"]},
+    "specimen": {"type": ["string", "null"]},
+    "name_original": {"type": ["string", "null"]},
+    "name_normalized": {"type": ["string", "null"]},
+    "generic_name": {"type": ["string", "null"]},
+    "brand_name": {"type": ["string", "null"]},
+    "strength": {"type": ["string", "null"]},
+    "dose": {"type": ["string", "null"]},
+    "dose_unit": {"type": ["string", "null"]},
+    "route": {"type": ["string", "null"]},
+    "frequency": {"type": ["string", "null"]},
+    "duration": {"type": ["string", "null"]},
+    "indication": {"type": ["string", "null"]},
+    "status": {"type": ["string", "null"]},
+    "type": {"type": ["string", "null"]},
+    "certainty": {"type": ["string", "null"]},
+    "confidence": {"type": ["number", "null"]},
+    "study_type": {"type": ["string", "null"]},
+    "body_part": {"type": ["string", "null"]},
+    "report_text": {"type": ["string", "null"]},
+    "text": {"type": ["string", "null"]},
+    "event": {"type": ["string", "null"]},
+    "summary": {"type": ["string", "null"]},
+    "reason": {"type": ["string", "null"]},
+    "field": {"type": ["string", "null"]},
+    "proposed_value": {"type": ["string", "null"]},
+    "raw_text": {"type": ["string", "null"]},
+    "verification_required": {"type": ["boolean", "null"]},
+    "age_months": {"type": ["number", "null"]},
+    "weight_kg": {"type": ["number", "null"]},
+    "height_cm": {"type": ["number", "null"]},
+    "head_circumference_cm": {"type": ["number", "null"]},
+    "bmi": {"type": ["number", "null"]},
+    "facility": {"type": ["string", "null"]},
+    "department": {"type": ["string", "null"]},
+    "physician": {"type": ["string", "null"]},
+    "source_files": {"type": "array", "items": {"type": "string"}},
+    "source_pages": {"type": "array", "items": {"type": "integer"}},
+    "findings": {"type": "array", "items": {"type": "string"}},
+    "impression": {"type": "array", "items": {"type": "string"}},
+}
+_PATIENT_FACT_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "properties": _PATIENT_FACT_PROPERTIES,
+    "required": list(_PATIENT_FACT_PROPERTIES),
+}
 
 
 @dataclass
@@ -78,6 +150,10 @@ class OpenAIProviderConfigurationError(RuntimeError):
     """Raised when OpenAI is selected without a usable backend configuration."""
 
 
+class PatientLevelAIError(RuntimeError):
+    """Raised when the required holistic patient review cannot be completed."""
+
+
 class OpenAIMedicalVisionProvider(DocumentVisionProvider):
     """Multimodal extraction through the official OpenAI Responses API.
 
@@ -90,6 +166,33 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
 
     name = "openai"
     version = "responses-v1"
+
+    _PATIENT_REVIEW_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "patient": _PATIENT_FACT_SCHEMA,
+            "record_quality": _PATIENT_FACT_SCHEMA,
+            "birth_history": _PATIENT_FACT_SCHEMA,
+            **{name: {"type": "array", "items": _PATIENT_FACT_SCHEMA} for name in (
+                "past_medical_history", "active_problems", "resolved_or_historical_problems", "encounters",
+                "symptoms", "clinical_findings", "diagnoses_documented", "clinical_interpretations",
+                "medications", "allergies", "laboratory_results", "radiology", "procedures", "vaccinations",
+                "growth_measurements", "clinical_timeline", "uncertain_items", "conflicts",
+            )},
+            "growth_interpretation": {"type": "string"},
+            "detailed_report_markdown": {"type": "string"},
+            "erp_summary_markdown": {"type": "string"},
+        },
+        "required": [
+            "patient", "record_quality", "birth_history", "past_medical_history", "active_problems",
+            "resolved_or_historical_problems", "encounters", "symptoms", "clinical_findings",
+            "diagnoses_documented", "clinical_interpretations", "medications", "allergies",
+            "laboratory_results", "radiology", "procedures", "vaccinations", "growth_measurements",
+            "growth_interpretation", "clinical_timeline", "uncertain_items", "conflicts",
+            "detailed_report_markdown", "erp_summary_markdown",
+        ],
+    }
 
     _PAGE_SCHEMA: dict[str, Any] = {
         "type": "object",
@@ -244,6 +347,109 @@ class OpenAIMedicalVisionProvider(DocumentVisionProvider):
         if self.configuration.ai_debug:
             logger.info("Second pass not required for page %s", page_number)
         return first
+
+    def review_patient(self, bundle: list[PatientBundleItem | dict[str, Any]]) -> PatientLevelReview:
+        """Review the complete patient bundle in one multimodal call.
+
+        A size-triggered hierarchical pass is the only fallback.  It still
+        sends the actual source visuals to the model and performs a final
+        patient-level synthesis; no OCR-first or page-by-page downgrade is
+        performed.
+        """
+        items = [item if isinstance(item, PatientBundleItem) else PatientBundleItem.model_validate(item) for item in bundle]
+        if not items:
+            raise PatientLevelAIError("AI medical review could not be completed: no source documents were available")
+        total_bytes = sum(Path(item.local_path).stat().st_size for item in items if Path(item.local_path).is_file())
+        if total_bytes <= self.configuration.ai_max_patient_bytes:
+            return self._request_patient_group(items)
+        if not self.configuration.ai_allow_hierarchical_fallback:
+            raise PatientLevelAIError("AI medical review could not be completed: patient record exceeds configured multimodal size limits")
+        group_size = max(1, self.configuration.ai_pages_per_request)
+        groups = [items[index:index + group_size] for index in range(0, len(items), group_size)]
+        logger.info("Patient record is large; using hierarchical multimodal review with %s source groups", len(groups))
+        reviews = [self._request_patient_group(group) for group in groups]
+        return self._synthesize_patient_reviews(reviews)
+
+    def _request_patient_group(self, items: list[PatientBundleItem]) -> PatientLevelReview:
+        instructions = (
+            "You are reviewing the complete medical record of a single patient.\n"
+            "Read ALL attached pages and images before creating the final clinical reconstruction.\n"
+            "Correlate information across visits and reports. Identify repeated findings, longitudinal changes, "
+            "resolved problems, persistent problems, and conflicting data. Do not treat each page as an isolated document.\n\n"
+            "Distinguish explicitly documented diagnoses, examination findings, laboratory findings, historical diagnoses, "
+            "AI clinical interpretation, suspected/probable diagnoses, and unreadable or uncertain information. "
+            "Never invent a date, medication dose, diagnosis, percentile, or allergy. Use null or an empty array when absent. "
+            "Every major fact must include source_files and source_pages and a confidence. Handwriting that is not reliable must be marked "
+            "'Illegible / requires clinician verification'. Return only the strict patient-level JSON schema.\n\n"
+            "Source manifest (preserve these IDs and order in all source references):\n"
+            + json.dumps([item.model_dump(mode="json", exclude={"local_path"}) for item in items], ensure_ascii=False)
+        )
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": instructions}]
+        seen_files: set[str] = set()
+        for item in sorted(items, key=lambda value: value.order_index):
+            path = Path(item.local_path)
+            if not path.is_file():
+                continue
+            data = path.read_bytes()
+            media_type = item.media_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            if media_type == "application/pdf":
+                if str(path) in seen_files:
+                    continue
+                content.append({"type": "input_file", "filename": item.relative_path or path.name, "file_data": f"data:application/pdf;base64,{b64encode(data).decode('ascii')}"})
+                seen_files.add(str(path))
+            elif media_type.startswith("image/"):
+                content.append({"type": "input_image", "image_url": f"data:{media_type};base64,{b64encode(self._resize_image(data, media_type)).decode('ascii')}", "detail": self.configuration.openai_image_detail})
+        payload = [{"role": "user", "content": content}]
+        started = time.monotonic()
+        for attempt in range(self.configuration.ai_max_retries + 1):
+            try:
+                with self._request_slots:
+                    response = self.client.responses.create(
+                        model=self.configuration.openai_medical_model,
+                        instructions=instructions,
+                        input=payload,
+                        text={"format": {"type": "json_schema", "name": "patient_level_medical_review", "strict": True, "schema": self._PATIENT_REVIEW_SCHEMA}},
+                        store=False,
+                        timeout=self.configuration.ai_request_timeout,
+                    )
+                raw = getattr(response, "output_text", None)
+                if not raw:
+                    raise ValueError("empty patient-level response")
+                result = PatientLevelReview.model_validate(json.loads(raw))
+                if self.configuration.ai_debug:
+                    logger.info("Patient-level multimodal review received in %.1f seconds", time.monotonic() - started)
+                return result
+            except Exception as exc:
+                if attempt >= self.configuration.ai_max_retries or not self._retryable(exc):
+                    raise PatientLevelAIError(f"AI medical review could not be completed: {type(exc).__name__}") from exc
+                time.sleep(min(2**attempt, 8))
+        raise PatientLevelAIError("AI medical review could not be completed")
+
+    def _synthesize_patient_reviews(self, reviews: list[PatientLevelReview]) -> PatientLevelReview:
+        """Synthesize multimodal group reviews into the same canonical schema."""
+        instructions = (
+            "You are synthesizing multimodal reviews of one patient's complete medical record. "
+            "Reconcile duplicates and conflicts, preserve source references and uncertainty, and produce the exact same "
+            "patient-level schema. Do not add facts absent from the group reviews. Write a coherent detailed physician report "
+            "and a concise approximately one-page ERP physician summary."
+        )
+        payload = [{"role": "user", "content": [{"type": "input_text", "text": instructions + "\nGROUP REVIEWS:\n" + json.dumps([item.model_dump(mode="json") for item in reviews], ensure_ascii=False)}]}]
+        try:
+            with self._request_slots:
+                response = self.client.responses.create(
+                    model=self.configuration.openai_summary_model,
+                    instructions=instructions,
+                    input=payload,
+                    text={"format": {"type": "json_schema", "name": "patient_level_medical_review", "strict": True, "schema": self._PATIENT_REVIEW_SCHEMA}},
+                    store=False,
+                    timeout=self.configuration.ai_request_timeout,
+                )
+            raw = getattr(response, "output_text", None)
+            if not raw:
+                raise ValueError("empty patient-level synthesis response")
+            return PatientLevelReview.model_validate(json.loads(raw))
+        except Exception as exc:
+            raise PatientLevelAIError(f"AI medical review could not be completed: {type(exc).__name__}") from exc
 
     def synthesize(self, structured_facts: dict[str, Any]) -> ClinicalSynthesis | None:
         """Run stage C using only the already validated structured record."""

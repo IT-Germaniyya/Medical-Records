@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from hashlib import sha256
+import mimetypes
 from pathlib import Path
 import shutil
 from uuid import uuid4
+from typing import Any
 
 from app.config import Settings, settings
 from app.exports.writer import write_outputs
 from app.repository import RecordRepository
-from app.schemas import DocumentType, FactStatus, PatientDemographics, ProvenancedValue, SourcePageInfo, SourceRef, StructuredRecord
+from app.schemas import DocumentType, FactStatus, PatientDemographics, ProblemItem, ProvenancedValue, SourcePageInfo, SourceRef, StructuredRecord
 from app.services.classification import classify
 from app.services.clinical import build_timeline_and_problems
 from app.services.extraction import extract_documented_facts, extract_identity_facts, source_ref, unreadable_page_item
 from app.services.ingestion import ArchiveLimits, IngestionError, extract_archive, detect_archive_type, ingest_folder
 from app.services.preprocessing import preprocess
-from app.services.providers import MedicalAIProvider, PageAnalysis, provider_for_settings
+from app.ai_schemas import PatientBundleItem, PatientLevelReview
+from app.services.providers import MedicalAIProvider, PageAnalysis, PatientLevelAIError, provider_for_settings
 from app.services.validation import apply_confidence_policy, apply_rule_validations
 
 
@@ -80,6 +85,20 @@ class PatientPipeline:
             source_pages: list[dict[str, object]] = [item.model_dump(mode="json") for item in record.source_pages]
             self._apply_upload_demographics(record, demographics)
             processed_files = list(record.source_files)
+            if self._use_patient_level_review():
+                prepared = self._prepare_patient_files(resolved_patient_id, ingested, processed_files)
+                existing_ids = {source_file.file_id for source_file in processed_files}
+                processed_files.extend(source_file for _, _, source_file in prepared if source_file.file_id not in existing_ids)
+                record.source_files = processed_files
+                source_pages = self._ensure_source_pages(record, source_pages)
+                bundle = self._patient_bundle(record, prepared)
+                review = self.provider.review_patient(bundle)  # type: ignore[attr-defined]
+                if review is None:
+                    raise PatientLevelAIError("AI medical review could not be completed")
+                self._apply_patient_review(record, review, resolved_patient_id)
+                # The patient-level review has already inspected every source;
+                # do not run the legacy per-page extraction path afterwards.
+                ingested = []
             for item in ingested:
                 result = preprocess(item, self.configuration.storage_root / resolved_patient_id / "processed")
                 source_file = item.source_file.model_copy(update={"processed_path": str(result.processed_path), "processing_status": "processed"})
@@ -186,6 +205,239 @@ class PatientPipeline:
         finally:
             if archive_root is not None:
                 shutil.rmtree(archive_root, ignore_errors=True)
+
+    def _use_patient_level_review(self) -> bool:
+        return (
+            self.configuration.ai_extraction_mode.casefold() == "patient_level"
+            and callable(getattr(self.provider, "review_patient", None))
+        )
+
+    def _prepare_patient_files(self, patient_id: str, ingested: list, existing: list) -> list[tuple[Any, Any, Any]]:
+        prepared: list[tuple[Any, Any, Any]] = []
+        processed_root = self.configuration.storage_root / patient_id / "processed"
+        existing_offset = max((item.source_order or 0 for item in existing), default=-1) + 1
+        for item in ingested:
+            result = preprocess(item, processed_root)
+            source_file = item.source_file.model_copy(update={"processed_path": str(result.processed_path), "processing_status": "processed", "source_order": existing_offset + (item.source_file.source_order or 0)})
+            prepared.append((item, result, source_file))
+        # Reprocessing uses the forensic originals already stored for this
+        # patient.  It must not create duplicate source rows or lose order.
+        if not prepared:
+            for source_file in existing:
+                path = Path(source_file.processed_path or source_file.original_path)
+                if path.is_file():
+                    prepared.append((None, None, source_file))
+        return prepared
+
+    @staticmethod
+    def _ensure_source_pages(record: StructuredRecord, source_pages: list[dict[str, object]]) -> list[dict[str, object]]:
+        known = {(page.file_id, page.page_number) for page in record.source_pages}
+        for source_file in record.source_files:
+            for page_number in range(1, (source_file.page_count or 1) + 1):
+                if (source_file.file_id, page_number) in known:
+                    continue
+                document_type, confidence = classify(source_file.original_filename, None)
+                page = SourcePageInfo(
+                    page_id=str(uuid4()), file_id=source_file.file_id, page_number=page_number,
+                    document_type=document_type, classification_confidence=confidence,
+                    extraction_status="pending_ai_review",
+                )
+                record.source_pages.append(page)
+                source_pages.append(page.model_dump(mode="json"))
+        return source_pages
+
+    @staticmethod
+    def _patient_bundle(record: StructuredRecord, prepared: list[tuple[Any, Any, Any]]) -> list[PatientBundleItem]:
+        ordered = sorted(
+            (source_file for _, _, source_file in prepared),
+            key=lambda item: (item.source_order if item.source_order is not None else 10**9, item.original_relative_path or item.original_filename),
+        )
+        items: list[PatientBundleItem] = []
+        for index, source_file in enumerate(ordered):
+            # The multimodal review receives the forensic original.  Derived
+            # preprocessing is retained for local/page-level fallback only.
+            path = Path(source_file.original_path)
+            media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            for page_number in range(1, (source_file.page_count or 1) + 1):
+                # PDF pages share one native input_file; image files naturally
+                # have one page.  The manifest still retains every page ID.
+                items.append(PatientBundleItem(
+                    source_id=source_file.file_id,
+                    source_file=source_file.original_filename,
+                    relative_path=source_file.original_relative_path or source_file.original_filename,
+                    page_number=page_number,
+                    order_index=index * 100000 + page_number,
+                    media_type=media_type,
+                    local_path=str(path),
+                ))
+        return items
+
+    def _apply_patient_review(self, record: StructuredRecord, review: PatientLevelReview, patient_id: str) -> None:
+        """Map the strict patient-level object into canonical typed views."""
+        payload = review.model_dump(mode="json")
+        if record.ai_clinical_review:
+            record.ai_review_history.append({
+                "version": record.ai_review_version,
+                "model": record.ai_review_model,
+                "prompt_version": record.ai_review_prompt_version,
+                "source_hash": record.ai_review_source_hash,
+                "created_at": record.ai_review_created_at.isoformat() if record.ai_review_created_at else None,
+                "review": record.ai_clinical_review,
+            })
+        source_hash = sha256("".join(item.checksum for item in sorted(record.source_files, key=lambda value: value.source_order if value.source_order is not None else 10**9)).encode()).hexdigest()
+        record.ai_clinical_review = payload
+        record.ai_review_version = f"v{len(record.ai_review_history) + 1}"
+        record.ai_review_model = self.configuration.openai_medical_model
+        record.ai_review_prompt_version = "patient_level_review_v1"
+        record.ai_review_source_hash = source_hash
+        record.ai_review_created_at = datetime.now(timezone.utc)
+
+        patient_data = payload.get("patient") or {}
+        if isinstance(patient_data, dict):
+            mapping = {"patient_name": "full_name", "full_name": "full_name", "mrn": "hospital_file_number", "hospital_file_number": "hospital_file_number", "dob": "date_of_birth", "date_of_birth": "date_of_birth", "sex": "sex", "nationality": "nationality", "address": "address"}
+            for source_name, target_name in mapping.items():
+                if source_name not in patient_data:
+                    continue
+                value = self._fact_value(patient_data[source_name])
+                if value in (None, ""):
+                    continue
+                field_item = patient_data[source_name] if isinstance(patient_data[source_name], dict) else patient_data
+                reference = self._fact_ref(field_item, record, "patient_level_review")
+                confidence = self._fact_confidence(field_item) or 0.90
+                setattr(record.patient, target_name, ProvenancedValue(value=value, raw_text=str(value), confidence=confidence, status=FactStatus.DOCUMENTED, source_ref=reference))
+
+        # A fresh AI review is canonical; never append stale page-level facts.
+        record.encounters = []
+        record.diagnoses = [self._diagnosis_from_fact(item, record) for item in payload.get("diagnoses_documented", []) if self._diagnosis_from_fact(item, record)]
+        record.medications = [self._medication_from_fact(item, record) for item in payload.get("medications", []) if self._medication_from_fact(item, record)]
+        record.laboratory_results = [self._lab_from_fact(item, record) for item in payload.get("laboratory_results", []) if self._lab_from_fact(item, record)]
+        record.radiology_reports = [self._radiology_from_fact(item, record) for item in payload.get("radiology", []) if self._radiology_from_fact(item, record)]
+        record.growth_measurements = [self._growth_from_fact(item, record) for item in payload.get("growth_measurements", []) if self._growth_from_fact(item, record)]
+        record.timeline = [self._timeline_from_fact(item, record) for item in payload.get("clinical_timeline", []) if self._timeline_from_fact(item, record)]
+        record.problem_list = []
+        for item in [*payload.get("active_problems", []), *payload.get("resolved_or_historical_problems", [])]:
+            value = self._fact_value(item)
+            if value:
+                status = str(item.get("status", "active")) if isinstance(item, dict) else "active"
+                record.problem_list.append(ProblemItem(problem=str(value), status=status, source_type="ai_clinical_review", source_refs=[self._fact_ref(item, record, "patient_level_review")]))
+        record.verification_queue = []
+        for item in payload.get("uncertain_items", []):
+            if not isinstance(item, dict):
+                continue
+            record.verification_queue.append(unreadable_page_item(
+                self._fact_ref(item, record, "patient_level_review").source_file,
+                self._fact_ref(item, record, "patient_level_review").source_page,
+                str(item.get("reason") or item.get("verification_required") or "Uncertain or illegible clinical information requires clinician verification"),
+            ))
+
+        record.clinical_synthesis = {
+            "record_quality": payload.get("record_quality", {}),
+            "clinical_interpretations": payload.get("clinical_interpretations", []),
+            "growth_interpretation": payload.get("growth_interpretation", ""),
+            "conflicts": payload.get("conflicts", []),
+        }
+
+    @staticmethod
+    def _fact_value(item: Any) -> Any:
+        if isinstance(item, dict):
+            for key in ("value", "term", "diagnosis", "problem", "name", "test_name", "text", "summary"):
+                if item.get(key) not in (None, ""):
+                    return item[key]
+        return item if item not in (None, "") else None
+
+    @staticmethod
+    def _fact_confidence(item: Any) -> float:
+        try:
+            return min(1.0, max(0.0, float(item.get("confidence", 0.0)))) if isinstance(item, dict) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _fact_ref(item: Any, record: StructuredRecord, method: str) -> SourceRef:
+        value = item if isinstance(item, dict) else {}
+        files = value.get("source_files") or value.get("source_file") or "unknown"
+        if isinstance(files, list):
+            files = files[0] if files else "unknown"
+        page_values = value.get("source_pages") or value.get("source_page") or 1
+        if isinstance(page_values, list):
+            page_values = page_values[0] if page_values else 1
+        try:
+            page = max(1, int(page_values))
+        except (TypeError, ValueError):
+            page = 1
+        source_file = str(files)
+        if source_file not in {source.original_filename for source in record.source_files}:
+            source = next((source for source in record.source_files if source.file_id == source_file), None)
+            source_file = source.original_filename if source else source_file
+        return SourceRef(source_file=source_file, source_page=page, extraction_method=method, prompt_version="patient_level_review_v1")
+
+    @classmethod
+    def _diagnosis_from_fact(cls, item: Any, record: StructuredRecord):
+        from app.schemas import Diagnosis
+        value = cls._fact_value(item)
+        if not value:
+            return None
+        ref = cls._fact_ref(item, record, "patient_level_review")
+        kind = str(item.get("type", "documented")) if isinstance(item, dict) else "documented"
+        if kind not in {"documented", "inferred", "differential", "historical"}:
+            kind = "documented"
+        certainty = str(item.get("certainty", "confirmed")) if isinstance(item, dict) else "confirmed"
+        if certainty not in {"confirmed", "probable", "possible", "uncertain"}:
+            certainty = "uncertain"
+        status = str(item.get("status", "unknown")) if isinstance(item, dict) else "unknown"
+        if status not in {"active", "resolved", "unknown"}:
+            status = "unknown"
+        return Diagnosis(term_original=str(value), term_normalized=item.get("normalized") if isinstance(item, dict) else None, type=kind, status=status, certainty=certainty, date=item.get("date") if isinstance(item, dict) else None, confidence=cls._fact_confidence(item), source_ref=ref)
+
+    @classmethod
+    def _medication_from_fact(cls, item: Any, record: StructuredRecord):
+        from app.schemas import Medication
+        if not isinstance(item, dict):
+            return None
+        value = cls._fact_value(item)
+        if not value:
+            return None
+        return Medication(name_original=str(item.get("name_original") or value), name_normalized=item.get("name_normalized"), generic_name=item.get("generic_name"), brand_name=item.get("brand_name"), strength=item.get("strength"), dose=item.get("dose"), dose_unit=item.get("dose_unit"), route=item.get("route"), frequency=item.get("frequency"), duration=item.get("duration"), indication=item.get("indication"), status=str(item.get("status", "unknown")), confidence=cls._fact_confidence(item), source_ref=cls._fact_ref(item, record, "patient_level_review"), verification_required=bool(item.get("verification_required", item.get("dose") in (None, ""))))
+
+    @classmethod
+    def _lab_from_fact(cls, item: Any, record: StructuredRecord):
+        from app.schemas import LaboratoryResult
+        if not isinstance(item, dict):
+            return None
+        value = cls._fact_value(item)
+        name = item.get("test_name_original") or item.get("test_name") or item.get("name")
+        if not name:
+            return None
+        numeric = item.get("value") if isinstance(item.get("value"), (int, float)) else None
+        return LaboratoryResult(test_name_original=str(name), test_name_normalized=item.get("test_name_normalized"), value=numeric, value_text=str(item.get("value_text") or value or ""), unit=item.get("unit"), reference_range=item.get("reference_range"), abnormal_flag=item.get("abnormal_flag"), date=item.get("date"), specimen=item.get("specimen"), confidence=cls._fact_confidence(item), source_ref=cls._fact_ref(item, record, "patient_level_review"))
+
+    @classmethod
+    def _radiology_from_fact(cls, item: Any, record: StructuredRecord):
+        from app.schemas import RadiologyReport
+        if not isinstance(item, dict):
+            return None
+        if not cls._fact_value(item) and not item.get("study_type"):
+            return None
+        return RadiologyReport(study_type=item.get("study_type"), body_part=item.get("body_part"), date=item.get("date"), report_text=item.get("report_text") or item.get("text"), findings=list(item.get("findings") or []), impression=list(item.get("impression") or []), confidence=cls._fact_confidence(item), source_ref=cls._fact_ref(item, record, "patient_level_review"))
+
+    @classmethod
+    def _growth_from_fact(cls, item: Any, record: StructuredRecord):
+        from app.schemas import GrowthMeasurement
+        if not isinstance(item, dict):
+            return None
+        if not any(item.get(key) is not None for key in ("weight_kg", "height_cm", "head_circumference_cm", "bmi")):
+            return None
+        return GrowthMeasurement(date=item.get("date"), age_months=item.get("age_months"), weight_kg=item.get("weight_kg"), height_cm=item.get("height_cm"), head_circumference_cm=item.get("head_circumference_cm"), bmi=item.get("bmi"), source=cls._fact_ref(item, record, "patient_level_review"), confidence=cls._fact_confidence(item))
+
+    @classmethod
+    def _timeline_from_fact(cls, item: Any, record: StructuredRecord):
+        from app.schemas import TimelineEvent
+        if not isinstance(item, dict):
+            return None
+        summary = str(item.get("summary") or item.get("event") or item.get("text") or "")
+        if not summary:
+            return None
+        return TimelineEvent(date=item.get("date"), event=str(item.get("event") or "Clinical encounter"), summary=summary, source_refs=[cls._fact_ref(item, record, "patient_level_review")])
 
     @staticmethod
     def _identity_from_ai(page_analysis: PageAnalysis, filename: str, page_number: int) -> dict[str, ProvenancedValue]:
