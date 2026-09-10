@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="MedRecords">
+  <rect width="64" height="64" rx="16" fill="#102a43"/>
+  <rect x="7" y="7" width="50" height="50" rx="12" fill="#37b4bc"/>
+  <path d="M27 15h10v12h12v10H37v12H27V37H15V27h12z" fill="#fff"/>
+</svg>

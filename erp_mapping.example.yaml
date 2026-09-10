@@ -1,0 +1,9 @@
+erp_mapping:
+  patient_id: PatientIdentifier
+  hospital_file_number: MedicalRecordNumber
+  diagnosis_name: DiagnosisDescription
+  diagnosis_code: ICD10
+  medication_name: MedicationName
+  laboratory_test: LabTestName
+  laboratory_value: ResultValue
+

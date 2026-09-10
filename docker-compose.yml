@@ -1,0 +1,58 @@
+services:
+  api:
+    build: .
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://medical:medical@postgres:5432/medical_records
+      STORAGE_ROOT: /var/lib/medical-data
+      OUTPUT_ROOT: /var/lib/medical-output
+    volumes:
+      - ./data:/var/lib/medical-data
+      - ./output:/var/lib/medical-output
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: python -m app.worker
+    environment:
+      DATABASE_URL: postgresql+psycopg://medical:medical@postgres:5432/medical_records
+      STORAGE_ROOT: /var/lib/medical-data
+      OUTPUT_ROOT: /var/lib/medical-output
+      BATCH_INPUT: /var/lib/medical-data/incoming/patients
+    volumes:
+      - ./data:/var/lib/medical-data
+      - ./output:/var/lib/medical-output
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: medical_records
+      POSTGRES_USER: medical
+      POSTGRES_PASSWORD: medical
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medical -d medical_records"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:

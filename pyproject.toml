@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medical-records-pipeline"
+version = "0.1.0"
+description = "Traceable, conservative medical record digitization MVP"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "uvicorn[standard]>=0.30,<1.0",
+  "sqlalchemy>=2.0,<3.0",
+  "alembic>=1.13,<2.0",
+  "psycopg[binary]>=3.2,<4.0",
+  "pydantic>=2.8,<3.0",
+  "pypdf>=5.0,<6.0",
+  "Pillow>=10.0,<12.0",
+  "python-multipart>=0.0.9,<1.0",
+  "jinja2>=3.1,<4.0",
+  "reportlab>=4.2,<5.0",
+  "rarfile>=4.2,<5.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[project.scripts]
+medical-ingest = "app.cli:main"
+
+[tool.setuptools]
+packages = ["app", "app.services", "app.terminology", "app.exports"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

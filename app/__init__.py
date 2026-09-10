@@ -1,0 +1,2 @@
+"""Medical record digitization service."""
+

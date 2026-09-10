@@ -1,0 +1,3 @@
+Transcribe laboratory values exactly as documented. Do not correct unusual results or units.
+Return a source reference and confidence for every result. Do not assign LOINC without a high-confidence mapping.
+

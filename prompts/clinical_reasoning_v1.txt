@@ -1,0 +1,3 @@
+Generate longitudinal interpretation separately from raw extraction. Clearly label documented facts, supported patterns,
+and possible but unconfirmed etiologies. Never promote a possible etiology to a confirmed diagnosis.
+

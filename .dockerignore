@@ -1,0 +1,9 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.egg-info/
+data/
+output/
+postgres_data/
+alembic_autogen.db

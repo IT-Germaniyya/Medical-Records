@@ -1,0 +1,3 @@
+Extract only explicitly documented encounter fields. Preserve exact source page and confidence for every field.
+Do not merge separate dated encounters. Missing or unclear values must be null with needs_verification.
+
