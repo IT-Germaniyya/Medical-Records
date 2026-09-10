@@ -3,18 +3,23 @@ from __future__ import annotations
 from collections.abc import Iterable
 from uuid import uuid4
 from datetime import datetime, timedelta
+from pathlib import Path
+import shutil
 
 from sqlalchemy import delete, select
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config import settings
 from app.models import (
     AuditEventModel,
+    ClinicalInterpretationModel,
     DiagnosisModel,
     EncounterModel,
     GrowthMeasurementModel,
     LaboratoryResultModel,
     MedicationModel,
+    ObservationModel,
     PatientModel,
     PatientRecordModel,
     ReportGenerationJobModel,
@@ -34,8 +39,10 @@ class DuplicateSourceError(ValueError):
 
 
 class RecordRepository:
-    def __init__(self, session_factory: sessionmaker[Session]):
+    def __init__(self, session_factory: sessionmaker[Session], *, storage_root: Path | None = None, output_root: Path | None = None):
         self.session_factory = session_factory
+        self.storage_root = Path(storage_root) if storage_root is not None else settings.storage_root
+        self.output_root = Path(output_root) if output_root is not None else settings.output_root
 
     def existing_checksum(self, checksum: str) -> SourceFileModel | None:
         with self.session_factory() as session:
@@ -153,6 +160,77 @@ class RecordRepository:
         with self.session_factory() as session:
             persisted = session.get(PatientRecordModel, patient_id)
             return StructuredRecord.model_validate(persisted.payload) if persisted else None
+
+    def delete_patient(self, patient_id: str) -> bool:
+        """Delete one patient and every persisted record that belongs to them.
+
+        Foreign keys are intentionally deleted in dependency order because the
+        existing schema predates database-level ON DELETE CASCADE constraints.
+        Source and generated report files are removed only from the configured
+        per-patient storage/output directories after the transaction commits.
+        """
+        with self.session_factory() as session:
+            patient = session.get(PatientModel, patient_id)
+            if patient is None:
+                return False
+            self._delete_patient_rows(session, patient_id)
+            session.delete(patient)
+            session.commit()
+        self._remove_patient_directories(patient_id)
+        return True
+
+    def delete_all_patients(self) -> int:
+        """Delete all patients and their records, returning the count removed."""
+        with self.session_factory() as session:
+            patient_ids = list(session.scalars(select(PatientModel.patient_id)))
+            if not patient_ids:
+                return 0
+            for patient_id in patient_ids:
+                self._delete_patient_rows(session, patient_id)
+            session.execute(delete(PatientModel).where(PatientModel.patient_id.in_(patient_ids)))
+            session.commit()
+        for patient_id in patient_ids:
+            self._remove_patient_directories(patient_id)
+        return len(patient_ids)
+
+    @staticmethod
+    def _delete_patient_rows(session: Session, patient_id: str) -> None:
+        """Remove all child rows for a patient in foreign-key-safe order."""
+        source_ids = list(session.scalars(select(SourceFileModel.file_id).where(SourceFileModel.patient_id == patient_id)))
+        report_ids = list(session.scalars(select(ReportModel.report_id).where(ReportModel.patient_id == patient_id)))
+        if report_ids:
+            session.execute(delete(ReportSourceLinkModel).where(ReportSourceLinkModel.report_id.in_(report_ids)))
+        if source_ids:
+            session.execute(delete(SourcePageModel).where(SourcePageModel.file_id.in_(source_ids)))
+
+        for model in (
+            ReportGenerationJobModel,
+            ReportModel,
+            SourceFileModel,
+            PatientRecordModel,
+            EncounterModel,
+            DiagnosisModel,
+            MedicationModel,
+            LaboratoryResultModel,
+            RadiologyReportModel,
+            ObservationModel,
+            GrowthMeasurementModel,
+            ClinicalInterpretationModel,
+            ProblemListModel,
+            VerificationItemModel,
+            AuditEventModel,
+        ):
+            session.execute(delete(model).where(model.patient_id == patient_id))
+
+    def _remove_patient_directories(self, patient_id: str) -> None:
+        """Remove only the exact per-patient directories under configured roots."""
+        if not patient_id or Path(patient_id).name != patient_id or patient_id in {".", ".."}:
+            return
+        for root in (self.storage_root, self.output_root):
+            root_resolved = root.resolve()
+            patient_dir = (root / patient_id).resolve()
+            if patient_dir.parent == root_resolved and patient_dir.name == patient_id and patient_dir.is_dir():
+                shutil.rmtree(patient_dir, ignore_errors=True)
 
     def source_path(self, patient_id: str, file_id: str) -> str | None:
         with self.session_factory() as session:

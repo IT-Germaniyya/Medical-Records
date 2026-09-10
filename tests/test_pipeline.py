@@ -117,3 +117,60 @@ def test_reports_are_grounded_versioned_and_separate(tmp_path: Path) -> None:
     erp_text = "\n".join(page.extract_text() or "" for page in PdfReader(erp.file_path).pages)
     assert "Appendix: Original Source Documents" not in erp_text
     assert "10.2" in erp_text
+
+
+def test_delete_patient_removes_record_reports_and_files(tmp_path: Path) -> None:
+    patient = tmp_path / "delete-me"
+    patient.mkdir()
+    text_pdf(patient / "lab.pdf", ["Hb: 10.2 g/dL"])
+    configuration = Settings(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'delete.db'}",
+        storage_root=tmp_path / "data",
+        output_root=tmp_path / "output",
+    )
+    create_schema(configuration.database_url)
+    repository = RecordRepository(
+        make_session_factory(configuration.database_url),
+        storage_root=configuration.storage_root,
+        output_root=configuration.output_root,
+    )
+    pipeline = PatientPipeline(repository, configuration)
+    pipeline.process(patient, patient_id="DELETE_ME")
+    ReportGenerator(repository, configuration).generate("DELETE_ME", ReportType.ERP_SUMMARY)
+    assert (configuration.storage_root / "DELETE_ME").is_dir()
+    assert (configuration.output_root / "DELETE_ME").is_dir()
+
+    assert repository.delete_patient("DELETE_ME") is True
+    assert repository.get_record("DELETE_ME") is None
+    assert repository.search_patients("DELETE_ME") == []
+    assert repository.list_reports(patient_id="DELETE_ME") == []
+    assert not (configuration.storage_root / "DELETE_ME").exists()
+    assert not (configuration.output_root / "DELETE_ME").exists()
+    assert repository.delete_patient("DELETE_ME") is False
+
+
+def test_delete_all_patients_removes_every_record(tmp_path: Path) -> None:
+    configuration = Settings(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'delete-all.db'}",
+        storage_root=tmp_path / "data",
+        output_root=tmp_path / "output",
+    )
+    create_schema(configuration.database_url)
+    repository = RecordRepository(
+        make_session_factory(configuration.database_url),
+        storage_root=configuration.storage_root,
+        output_root=configuration.output_root,
+    )
+    pipeline = PatientPipeline(repository, configuration)
+    for patient_id in ("DELETE_A", "DELETE_B"):
+        source = tmp_path / patient_id
+        source.mkdir()
+        text_pdf(source / "lab.pdf", [f"Patient: {patient_id}", "Hb: 10.2 g/dL"])
+        pipeline.process(source, patient_id=patient_id)
+
+    assert repository.delete_all_patients() == 2
+    assert repository.dashboard_metrics()["total_patients"] == 0
+    assert repository.search_patients() == []
+    assert repository.delete_all_patients() == 0
+    assert not (configuration.storage_root / "DELETE_A").exists()
+    assert not (configuration.storage_root / "DELETE_B").exists()

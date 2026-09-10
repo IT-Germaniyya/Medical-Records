@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 import shutil
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -59,6 +59,21 @@ def patient_record(patient_id: str) -> StructuredRecord:
 @app.get("/patients", response_model=list)
 def search_patients(q: str = "", limit: int = 50):
     return [item.model_dump(mode="json") for item in repository.search_patients(q, limit)]
+
+
+@app.delete("/patients/{patient_id}")
+def delete_patient(patient_id: str) -> dict[str, object]:
+    if not repository.delete_patient(patient_id):
+        raise HTTPException(status_code=404, detail="patient record not found")
+    return {"deleted": True, "patient_id": patient_id}
+
+
+@app.delete("/patients")
+def delete_all_patients(confirm: str = Query(default="")) -> dict[str, object]:
+    if confirm != "DELETE ALL":
+        raise HTTPException(status_code=400, detail="confirmation required: pass confirm=DELETE ALL")
+    deleted_count = repository.delete_all_patients()
+    return {"deleted": True, "deleted_count": deleted_count}
 
 
 @app.get("/dashboard")
