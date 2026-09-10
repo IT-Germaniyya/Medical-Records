@@ -1,0 +1,1 @@
+Prescription mode. Extract drug name, brand, generic, strength, dose, dose unit, route, frequency, duration, and indication independently. Never infer a missing dose from usual dosing or from another medicine. Keep unreadable fields null and add a review item. Return strict structured JSON only.

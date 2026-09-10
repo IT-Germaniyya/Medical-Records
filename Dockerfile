@@ -12,6 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /service
 COPY pyproject.toml README.md ./
 COPY app ./app
+COPY prompts ./prompts
 COPY templates ./templates
 COPY alembic ./alembic
 COPY alembic.ini batch_process.py ingest.py evaluate_pilot.py generate_reports.py ./

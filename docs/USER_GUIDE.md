@@ -20,6 +20,10 @@ Open [http://localhost:8080](http://localhost:8080) in the hospital workstation 
 
 To add documents to an existing patient, open that patient and select **Add documents**. Earlier source files and extracted facts are retained. Duplicate files are skipped by checksum. Unsupported files inside an archive are skipped with a warning; nested archives are skipped for safety.
 
+## Optional multimodal extraction
+
+The default `AI_PROVIDER=local_safe` mode never sends records over the network. After a privacy/security review and approval to use an external processor, set `AI_PROVIDER=openai` for the backend and worker only. Provide `OPENAI_API_KEY`, `OPENAI_MEDICAL_MODEL`, `OPENAI_FAST_MODEL`, and `OPENAI_REASONING_MODEL` through an untracked `.env` or a deployment secret manager. The key is never exposed to frontend JavaScript. The provider uses the Responses API with strict structured JSON, routes complex/handwritten pages to the medical model, retries transient failures, and sends uncertain fields to Review Items. Use `python -m app.tools.test_openai_extraction path/to/deidentified-page.jpg` only for an explicitly approved, de-identified smoke test.
+
 ## Search for a patient
 
 Select **Patients**. Search using a full or partial name, patient ID, or hospital file number/MRN. Select a result to open its Patient Workspace.

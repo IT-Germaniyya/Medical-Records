@@ -1,0 +1,1 @@
+Growth-chart mode. Extract only written sex, age/date, weight, height/length, head circumference, BMI, chart type, and numeric values. Do not infer precise percentiles from unclear plotted points and do not invent measurements. Mark ambiguous labels or points for review. Return strict structured JSON only.

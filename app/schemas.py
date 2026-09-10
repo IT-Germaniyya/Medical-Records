@@ -236,6 +236,9 @@ class StructuredRecord(BaseModel):
     problem_list: list[ProblemItem] = Field(default_factory=list)
     verification_queue: list[VerificationItem] = Field(default_factory=list)
     audit_events: list[AuditEvent] = Field(default_factory=list)
+    # Optional, reviewable output from the patient-level reasoning stage. The
+    # canonical facts above remain the source of truth for reports.
+    clinical_synthesis: dict[str, Any] | None = None
     processing_warnings: list[str] = Field(default_factory=list)
     patient_status: str = "completed"
 

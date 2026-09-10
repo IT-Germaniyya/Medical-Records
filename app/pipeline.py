@@ -14,7 +14,7 @@ from app.services.clinical import build_timeline_and_problems
 from app.services.extraction import extract_documented_facts, extract_identity_facts, source_ref, unreadable_page_item
 from app.services.ingestion import ArchiveLimits, IngestionError, extract_archive, detect_archive_type, ingest_folder
 from app.services.preprocessing import preprocess
-from app.services.providers import LocalSafeProvider, MedicalAIProvider
+from app.services.providers import MedicalAIProvider, PageAnalysis, provider_for_settings
 from app.services.validation import apply_confidence_policy, apply_rule_validations
 
 
@@ -30,7 +30,7 @@ class PatientPipeline:
     def __init__(self, repository: RecordRepository, configuration: Settings = settings, provider: MedicalAIProvider | None = None):
         self.repository = repository
         self.configuration = configuration
-        self.provider = provider or LocalSafeProvider()
+        self.provider = provider or provider_for_settings(configuration)
 
     def process(self, source: Path, patient_id: str | None = None, resume: bool = True, demographics: dict[str, str | None] | None = None, source_mime_type: str | None = None) -> ProcessingResult:
         archive_result = None
@@ -86,9 +86,24 @@ class PatientPipeline:
                 processed_files.append(source_file)
                 total_pages = source_file.page_count or 1
                 for page_number in range(1, total_pages + 1):
-                    text = self.provider.extract_text(result.processed_path, page_number)
+                    filename_hint, _ = classify(source_file.original_filename, None)
+                    page_analysis = self.provider.extract_page(
+                        result.processed_path,
+                        page_number,
+                        source_filename=source_file.original_filename,
+                        document_type_hint=filename_hint.value,
+                    )
+                    text = page_analysis.text
                     document_type, classification_confidence = classify(source_file.original_filename, text)
-                    status = "extracted" if text else "needs_verification"
+                    if page_analysis.structured:
+                        try:
+                            structured_type = DocumentType(page_analysis.structured.document_type.casefold())
+                        except (ValueError, AttributeError):
+                            structured_type = DocumentType.UNKNOWN
+                        if structured_type != DocumentType.UNKNOWN:
+                            document_type = structured_type
+                            classification_confidence = page_analysis.confidence
+                    status = "extracted" if text or page_analysis.structured else "needs_verification"
                     page_info = SourcePageInfo(
                         page_id=str(uuid4()), file_id=source_file.file_id, page_number=page_number,
                         document_type=document_type, classification_confidence=classification_confidence,
@@ -96,18 +111,52 @@ class PatientPipeline:
                     )
                     record.source_pages.append(page_info)
                     source_pages.append(page_info.model_dump(mode="json"))
-                    if text:
+                    if page_analysis.structured:
+                        identity = self._identity_from_ai(page_analysis, source_file.original_filename, page_number)
+                        self._merge_document_identity(record, identity, resolved_patient_id)
+                        if identity:
+                            from app.services.extraction import _review
+                            for field_name, candidate in identity.items():
+                                if candidate.status != FactStatus.DOCUMENTED:
+                                    record.verification_queue.append(_review(
+                                        field_name,
+                                        str(candidate.value),
+                                        candidate.raw_text,
+                                        candidate.confidence,
+                                        "AI identity field is inferred or marked uncertain",
+                                        candidate.source_ref,
+                                        "medical_review",
+                                    ))
+                        extracted = extract_documented_facts(
+                            resolved_patient_id,
+                            text or "",
+                            source_file.original_filename,
+                            page_number,
+                            document_type,
+                            ai_page=page_analysis.structured,
+                            model=page_analysis.model,
+                            prompt_version=page_analysis.prompt_version,
+                        )
+                        record.diagnoses.extend(extracted.diagnoses)
+                        record.medications.extend(extracted.medications)
+                        record.laboratory_results.extend(extracted.labs)
+                        record.radiology_reports.extend(extracted.radiology)
+                        record.growth_measurements.extend(extracted.growth)
+                        record.verification_queue.extend(extracted.verification)
+                        record.audit_events.extend(extracted.audit)
+                    elif text:
                         identity = extract_identity_facts(text, source_file.original_filename, page_number)
                         self._merge_document_identity(record, identity, resolved_patient_id)
                         extracted = extract_documented_facts(resolved_patient_id, text, source_file.original_filename, page_number, document_type)
                         record.diagnoses.extend(extracted.diagnoses)
                         record.medications.extend(extracted.medications)
                         record.laboratory_results.extend(extracted.labs)
+                        record.radiology_reports.extend(extracted.radiology)
                         record.growth_measurements.extend(extracted.growth)
                         record.verification_queue.extend(extracted.verification)
                         record.audit_events.extend(extracted.audit)
                     else:
-                        reason = "no machine-readable text extracted; configure validated OCR/vision provider or review source"
+                        reason = page_analysis.error or "no machine-readable text extracted; configure validated OCR/vision provider or review source"
                         record.verification_queue.append(unreadable_page_item(source_file.original_filename, page_number, reason))
                 for warning in [*item.warnings, *result.warnings]:
                     record.verification_queue.append(unreadable_page_item(source_file.original_filename, 1, warning))
@@ -117,6 +166,18 @@ class PatientPipeline:
             build_timeline_and_problems(record)
             apply_confidence_policy(record, self.configuration.confidence_high, self.configuration.confidence_medium, self.configuration.high_risk_confidence)
             apply_rule_validations(record)
+            synthesize = getattr(self.provider, "synthesize", None)
+            if callable(synthesize):
+                # Stage C receives canonical structured facts only. Raw images,
+                # OCR text, and unvalidated model output are deliberately not
+                # sent to the reasoning model.
+                synthesis_input = record.model_dump(
+                    mode="json",
+                    include={"encounters", "diagnoses", "medications", "laboratory_results", "radiology_reports", "growth_measurements", "timeline", "problem_list", "verification_queue"},
+                )
+                synthesis = synthesize(synthesis_input)
+                if synthesis is not None:
+                    record.clinical_synthesis = synthesis.model_dump(mode="json")
             if record.verification_queue or record.processing_warnings:
                 record.patient_status = "completed_with_warnings"
             self.repository.save(record, source_pages)
@@ -125,6 +186,37 @@ class PatientPipeline:
         finally:
             if archive_root is not None:
                 shutil.rmtree(archive_root, ignore_errors=True)
+
+    @staticmethod
+    def _identity_from_ai(page_analysis: PageAnalysis, filename: str, page_number: int) -> dict[str, ProvenancedValue]:
+        if not page_analysis.structured:
+            return {}
+        identity: dict[str, ProvenancedValue] = {}
+        ref_method = "openai_responses"
+        for field_name, field in page_analysis.structured.patient_identity.model_dump().items():
+            if not field or field.get("value") in (None, ""):
+                continue
+            value = field.get("value")
+            field_status = (
+                FactStatus.NEEDS_VERIFICATION
+                if field.get("needs_verification")
+                else FactStatus.INFERRED
+                if field.get("documented_vs_inferred") == "inferred"
+                else FactStatus.DOCUMENTED
+            )
+            identity[field_name] = ProvenancedValue(
+                value=value,
+                raw_text=str(value),
+                confidence=float(field.get("confidence", page_analysis.confidence)),
+                status=field_status,
+                source_ref=SourceRef(
+                    source_file=filename,
+                    source_page=page_number,
+                    extraction_method=ref_method,
+                    prompt_version=page_analysis.prompt_version,
+                ),
+            )
+        return identity
 
     @staticmethod
     def _apply_upload_demographics(record: StructuredRecord, demographics: dict[str, str | None] | None) -> None:

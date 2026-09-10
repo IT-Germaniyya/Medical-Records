@@ -7,7 +7,7 @@ A conservative, traceable prototype for digitizing one legacy patient folder int
 - Ingests one folder, ZIP, or RAR archive of JPG, JPEG, PNG, and PDF documents. ZIP/RAR archives use the same upload workflow, are detected from magic bytes, and may contain root files or nested folders.
 - RAR extraction uses `rarfile` with Unar/libarchive inside Docker; archive limits, traversal/symlink checks, duplicate checks, and nested-archive blocking are applied before medical ingestion.
 - Copies originals to immutable-style `original/` storage, produces separate `processed/` derivatives (EXIF orientation correction, cautious uniform-border crop, contrast enhancement, low-resolution and possible-glare flags), SHA-256 deduplicates documents, and preserves file/page provenance.
-- Reads embedded PDF text locally. Image-only pages and non-readable PDFs are placed in the human-review queue; this baseline does not send PHI to any external AI provider.
+- Reads embedded PDF text locally. Image-only pages and non-readable PDFs are placed in the human-review queue by default. An opt-in OpenAI provider is available behind `AI_PROVIDER=openai`; it uses the official Responses API, strict structured outputs, configurable fast/medical/reasoning models, retries, and provenance-aware human review. API keys remain backend/worker-only environment secrets.
 - Classifies each page conservatively, extracts only narrow explicitly labeled fields (laboratory values, diagnoses, medication lines, and numeric growth measures), and stores field-level audit events.
 - Persists canonical JSON plus relational PostgreSQL rows, with Alembic migrations for the base schema and the patient-workspace/report/job tables.
 - Produces the MVP files requested per patient: `structured_record.json`, `physician_summary.txt`, `timeline.json`, and `verification_queue.json`, plus CSV, HTML, audit, patient JSON, and FHIR-style exports.
@@ -16,6 +16,7 @@ A conservative, traceable prototype for digitizing one legacy patient folder int
 ## Deliberate safety boundaries
 
 - The local provider does **not** OCR images, interpret charts/ECGs, infer a diagnosis, calculate growth percentiles, correct abnormal labs, assign a dose, or assign ICD-10/SNOMED/LOINC codes.
+- The OpenAI provider is an optional extraction aid, not clinical validation. It transcribes before interpreting, never fills unreadable medication doses, and queues low-confidence or high-risk values for human review. Validate privacy, security, model behavior, and local regulatory requirements before enabling it for PHI.
 - A diagnosis or medication extracted from text is still queued for medical review. Missing dose/frequency becomes a review item, never a guessed dose.
 - "No allergy extracted" is not reported as "no allergy." Undated information is not added to the chronological timeline.
 - This is a prototype, not a clinical decision-support system or production deployment. Perform security validation, clinical validation, and local regulatory review before using real patient data.

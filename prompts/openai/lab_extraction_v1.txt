@@ -1,0 +1,1 @@
+Laboratory mode. Extract only written test name, numeric or textual value, unit, reference range, abnormal flag, specimen, and documented date. Preserve decimal separators and qualifiers exactly. Do not calculate, normalize, or silently repair a laboratory result. Mark any uncertain character or value for review. Return strict structured JSON only.
